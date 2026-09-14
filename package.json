@@ -1,0 +1,17 @@
+{
+  "name": "threads-monitor",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Threads 關鍵字輿情監測：前台儀表板＋後台管理＋每日爬蟲",
+  "scripts": {
+    "start": "node --no-warnings server/index.js",
+    "crawl": "node --no-warnings server/crawl-cli.js"
+  },
+  "dependencies": {
+    "chart.js": "^4.4.7",
+    "exceljs": "^4.4.0",
+    "express": "^4.21.2",
+    "playwright": "^1.62.1"
+  }
+}

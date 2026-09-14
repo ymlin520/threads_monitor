@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Threads 監測</title>
+  <link rel="stylesheet" href="/app.css">
+</head>
+<body>
+  <div id="auth" hidden></div>
+
+  <div id="app" class="app" hidden>
+    <aside class="side">
+      <div class="brand">Threads 監測<span>輿情・主題・帳號分析</span></div>
+      <label class="field">工作區
+        <select id="wsSelect"></select>
+      </label>
+      <nav id="nav" class="nav"></nav>
+      <div class="side-foot">
+        <div id="meName"></div>
+        <a href="#/me">我的帳號</a> · <button id="logoutBtn" class="link" type="button">登出</button>
+      </div>
+    </aside>
+    <main>
+      <header class="topbar">
+        <h1 id="pageTitle"></h1>
+        <div class="topbar-right">
+          <span id="crawlBadge" class="small muted"></span>
+          <label class="check small">期間
+            <select id="daysSelect">
+              <option value="7">近 7 天</option>
+              <option value="14">近 14 天</option>
+              <option value="30">近 30 天</option>
+              <option value="90">近 90 天</option>
+            </select>
+          </label>
+          <a id="exportBtn" class="btn sm" href="#">匯出 Excel 報表</a>
+        </div>
+      </header>
+      <div id="view"></div>
+    </main>
+  </div>
+
+  <div id="toast" hidden></div>
+  <script src="/vendor/chart.umd.js"></script>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>
