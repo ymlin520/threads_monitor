@@ -163,6 +163,7 @@ const guestNote = `<div class="note">目前以訪客身分抓取 Threads：每�
 // ── 路由 ─────────────────────────────────────────────────────────────
 const ROUTES = {
   overview: { title: "總覽", group: "分析", render: viewOverview },
+  negative: { title: "負面留言板", group: "分析", render: viewNegative },
   topics: { title: "主題監測", group: "分析", render: viewTopics },
   compare: { title: "主題交叉比較", group: "分析", render: viewCompare },
   posts: { title: "貼文成效", group: "分析", render: viewPosts },
@@ -171,6 +172,7 @@ const ROUTES = {
   times: { title: "最佳發文時段", group: "分析", render: viewTimes },
   patterns: { title: "內容成功模式", group: "分析", render: viewPatterns },
   manage: { title: "監測設定", group: "管理", render: viewManage },
+  quick: { title: "立即爬文", group: "管理", render: viewQuick },
   crawl: { title: "抓取與排程", group: "管理", render: viewCrawl },
   members: { title: "成員", group: "管理", render: viewMembers, min: "admin" },
   system: { title: "系統設定", group: "管理", render: viewSystem, owner: true },
@@ -236,9 +238,9 @@ async function viewOverview(el) {
         ${d.top_posts.length ? `<ul class="list">${d.top_posts.map((p) => `<li><a href="#/post/${p.code}">${esc(snippet(p.content, 60))}</a>
           <div class="meta"><span>@${esc(p.author)}</span><span>${twTime(p.posted_at)}</span><span>互動 ${fmt(p.inter)}</span>${p.views != null ? `<span>瀏覽 ${short(p.views)}</span>` : ""}${flags(p.neg_hits)}</div></li>`).join("")}</ul>` : empty("尚無資料")}
       </section>
-      <section class="card"><h2>需要注意的留言</h2><p class="sub">含負面關鍵字或判斷為負面，依按讚數排序</p>
+      <section class="card"><h2>需要注意的留言</h2><p class="sub">含負面關鍵字或判斷為負面，依按讚數排序・<a href="#/negative">看全部可能負面的留言 →</a></p>
         ${d.flagged.length ? `<ul class="list">${d.flagged.map((c) => `<li>${esc(snippet(c.content, 80))}
-          <div class="meta"><span>@${esc(c.author)}</span><span>讚 ${fmt(c.likes)}</span>${sentBadge(c.sentiment)}${flags(c.neg_hits)}<a href="#/post/${c.post_code}">看原文</a></div></li>`).join("")}</ul>` : empty("沒有需要注意的留言")}
+          <div class="meta"><span>@${esc(c.author)}</span><span>讚 ${fmt(c.likes)}</span>${sentBadge(c.sentiment)}${flags(c.neg_hits)}<a href="https://www.threads.com/@${esc(c.post_author)}/post/${esc(c.post_code)}" target="_blank" rel="noopener">看原文 ↗</a></div></li>`).join("")}</ul>` : empty("沒有需要注意的留言")}
       </section>
     </div>
     <div class="grid2">
@@ -261,12 +263,83 @@ async function viewOverview(el) {
   });
 }
 
+const RUN_ST = { success: "完成", failed: "失敗", running: "進行中", interrupted: "中斷" };
+const triggerName = (r) => (r.trigger === "schedule" ? "排程"
+  : `${r.started_by || "手動"}${r.trigger === "quick" ? `・立即爬文${r.window_hours ? ` ${r.window_hours} 小時` : ""}` : ""}`);
+
 function runSummary(r) {
   if (!r) return empty(`還沒抓過。${can("editor") ? `<a href="#/crawl">去抓第一次</a>` : ""}`);
-  const st = { success: "完成", failed: "失敗", running: "進行中", interrupted: "中斷" }[r.status] || r.status;
-  return `<p>${twFull(r.started_at)}（${r.trigger === "schedule" ? "排程" : r.started_by || "手動"}）— <strong>${st}</strong></p>
+  const st = RUN_ST[r.status] || r.status;
+  return `<p>${twFull(r.started_at)}（${esc(triggerName(r))}）— <strong>${st}</strong></p>
     <p class="muted small">主題收錄 ${fmt(r.posts_found)} 篇・新貼文 ${fmt(r.posts_new)} 篇・已抓過略過 ${fmt(r.posts_skipped)} 篇・帳號 ${fmt(r.profiles_seen)} 個・點進 ${fmt(r.posts_visited)} 篇・留言 ${fmt(r.comments_found)} 則${r.logged_out ? "・遇到登入牆" : ""}</p>
     ${r.error ? `<p class="flag">${esc(r.error)}</p>` : ""}<a href="#/crawl">看抓取紀錄</a>`;
+}
+
+// ── 前台：負面留言板 ─────────────────────────────────────────────────
+const LEVEL = { high: ["高度", "⚠"], mid: ["中度", "▲"], low: ["低度", "●"] };
+const clip = (s, n) => (s.length > n ? s.slice(0, n) + "…" : s);
+
+// 命中的詞用 <mark> 標出來；先轉義再比對，長詞優先
+function highlight(text, terms) {
+  let html = esc(text || "（無文字）");
+  for (const t of [...new Set(terms)].filter(Boolean).sort((a, b) => b.length - a.length)) {
+    html = html.split(esc(t)).join(` ${esc(t)}`);
+  }
+  return html.replace(/ /g, "<mark>").replace(//g, "</mark>");
+}
+
+function negItem(i) {
+  const [name, icon] = LEVEL[i.level];
+  return `<li class="item">
+    <div><span class="sev ${i.level}">${icon} ${name}</span></div>
+    <div>
+      <div class="text">${highlight(i.content, i.hits.map((h) => h.term))}</div>
+      <div class="reply-to">${i.post ? `回覆 @${esc(i.post.author)}：${esc(snippet(i.post.content, 50))}` : "貼文本身"}</div>
+      <div class="meta"><span>${authorLink(i.author)}</span><span>${twTime(i.posted_at)}</span><span>讚 ${fmt(i.likes)}</span>${i.author_liked ? "<span>原作者說讚</span>" : ""}
+        <a href="${esc(i.url)}" target="_blank" rel="noopener">${i.type === "comment" ? "這則留言" : "原貼文"} ↗</a>
+        ${i.post ? `<a href="${esc(i.post.url)}" target="_blank" rel="noopener">看原文 ↗</a>` : ""}
+        <a href="#/post/${esc(i.post ? i.post.code : i.code)}">系統內詳情</a></div>
+      <div class="hits">${i.hits.map((h) => `<span class="hit">${esc(h.cat)}：<b>${esc(clip(h.term, 16))}</b></span>`).join("")}${i.hits.length ? "" : `<span class="hit">字典判定負面</span>`}</div>
+    </div></li>`;
+}
+
+async function viewNegative(el) {
+  const st = (S.neg ||= { level: "", type: "comment", sort: "severity", q: "" });
+  const qs = `days=${S.days}${sourceQuery()}&type=${st.type}&sort=${st.sort}${st.level ? `&level=${st.level}` : ""}${st.q ? `&q=${encodeURIComponent(st.q)}` : ""}`;
+  const d = await api(`/api/ws/negative?${qs}`);
+  const c = d.counts;
+  const seg = (key, opts) => `<div class="seg" data-seg="${key}">${opts.map(([v, t]) => `<button class="${st[key] === v ? "on" : ""}" data-v="${v}">${t}</button>`).join("")}</div>`;
+  const noun = { comment: "留言", post: "貼文", all: "留言與貼文" }[st.type];
+  el.innerHTML = `
+    <div class="filters">${sourceSelect()}
+      ${seg("type", [["comment", "留言"], ["post", "貼文"], ["all", "全部"]])}
+      <select id="negSort" aria-label="排序"><option value="severity">嚴重度優先</option><option value="likes">按讚最多</option><option value="newest">最新</option></select>
+      <input type="search" id="negQ" placeholder="搜尋內容或訊號" value="${esc(st.q)}">
+      <a class="btn sm" href="/api/ws/negative.csv?ws=${S.ws.id}&${qs}">下載 CSV</a>
+    </div>
+    <div class="note">把可能是負面的內容盡量找出來，寧可多抓：輿情關鍵字、強烈負評與粗話、抱怨詞、質問句、勸退、反諷語氣與負面表情都算訊號，依強弱分三級。
+      <strong>高度</strong>＝含輿情關鍵字或多個強烈訊號；<strong>中度</strong>＝明確負評；<strong>低度</strong>＝可能負面，建議人工確認。系統設定的「負面輿情關鍵字」「負面詞」也會一併比對。</div>
+    <div class="tiles">
+      ${tile(`可能負面${noun}`, fmt(c.total) + " 則", `涉及 ${fmt(c.posts)} 篇貼文`)}
+      ${tile("⚠ 高度", fmt(c.high), "輿情關鍵字或強烈負評", c.high ? "warn" : "")}
+      ${tile("▲ 中度", fmt(c.mid), "明確負評")}
+      ${tile("● 低度", fmt(c.low), "可能負面，需人工確認")}
+    </div>
+    <section class="card"><h2>最常出現的負面訊號</h2><p class="sub">點一下只看含這個訊號的內容</p>
+      ${d.topSignals.length ? `<div class="hits">${d.topSignals.map((s) => `<button class="hit" data-q="${esc(s.term)}"><b>${esc(clip(s.term, 14))}</b> ${esc(s.cat)}・${s.count}</button>`).join("")}</div>` : empty("期間內沒有偵測到負面訊號")}
+    </section>
+    <section class="card"><h2>負面${noun}（${fmt(d.matched)} 則${d.matched > d.shown ? `，顯示前 ${fmt(d.shown)} 則，完整內容請下載 CSV` : ""}）</h2>
+      <div class="filters">${seg("level", [["", `全部 ${c.total}`], ["high", `⚠ 高度 ${c.high}`], ["mid", `▲ 中度 ${c.mid}`], ["low", `● 低度 ${c.low}`]])}
+        ${st.q ? `<span class="small">只看含「${esc(clip(st.q, 16))}」 <button class="link" id="negClear">清除</button></span>` : ""}</div>
+      ${d.items.length ? `<ul class="board">${d.items.map(negItem).join("")}</ul>` : empty("沒有符合條件的內容")}
+    </section>`;
+  $("#negSort").value = st.sort;
+  bindSource(() => route());
+  $$("[data-seg]", el).forEach((g) => $$("button", g).forEach((b) => b.addEventListener("click", () => { st[g.dataset.seg] = b.dataset.v; route(); })));
+  $("#negSort").addEventListener("change", (e) => { st.sort = e.target.value; route(); });
+  $("#negQ").addEventListener("change", (e) => { st.q = e.target.value.trim(); route(); });
+  $$("[data-q]", el).forEach((b) => b.addEventListener("click", () => { st.q = b.dataset.q; route(); }));
+  $("#negClear")?.addEventListener("click", () => { st.q = ""; route(); });
 }
 
 // ── 前台：主題監測（提及數、互動、平均、趨勢、排名、熱門貼文）─────────────
@@ -679,30 +752,113 @@ async function viewManage(el) {
   $$("[data-acc-del]").forEach((b) => b.addEventListener("click", () => confirm("確定移除這個帳號？") && act(() => api(`/api/ws/accounts/${b.dataset.accDel}`, { method: "DELETE" }))));
 }
 
+// ── 後台：立即爬文（只抓近幾小時、抓過的不重複）─────────────────────────
+const QUICK_HOURS = [3, 6, 12, 24];
+const ago = (iso) => { const m = Math.max(0, Math.round((Date.now() - Date.parse(iso)) / 60000)); return m < 60 ? `${m} 分鐘前` : `${Math.floor(m / 60)} 小時前`; };
+
+// 立即爬文與抓取與排程共用：這個工作區已抓到、發布時間最新的 10 篇貼文；isNew 決定哪些標「新」
+const fetchLatest = () => api("/api/ws/posts?days=365&sort=newest&limit=10");
+function latestPostsCard(id, posts, isNew, note = "") {
+  const cols = [
+    { label: "發布時間", sort: "posted_at", render: (p) => `<span class="nowrap">${twTime(p.posted_at)}</span><div class="muted small nowrap">${ago(p.posted_at)}</div>` },
+    { label: "作者", render: (p) => authorLink(p.author) },
+    { label: "內文", cls: "content-cell", render: (p) => `${isNew(p) ? '<span class="badge new">新</span> ' : ""}<a href="#/post/${p.code}">${esc(snippet(p.content, 70))}</a>${p.media_type && p.media_type !== "text" ? ` <span class="badge">${p.media_type === "video" ? "影片" : "圖片"}</span>` : ""} ${flags(p.neg_hits)}` },
+    { label: "來源", render: (p) => `<span class="small">${esc(p.topics || "監測帳號")}</span>` },
+    { label: "讚", sort: "likes", num: true, render: (p) => fmt(p.likes) },
+    { label: "留言", sort: "replies", num: true, render: (p) => fmt(p.replies) },
+    { label: "瀏覽", sort: "views", num: true, render: (p) => short(p.views) },
+    { label: "", render: (p) => `<a href="${esc(p.url)}" target="_blank" rel="noopener" class="small nowrap">Threads ↗</a>` },
+  ];
+  return `<section class="card"><h2>最新 10 篇貼文</h2>
+    <p class="sub">這個工作區已抓到的貼文，依發布時間由新到舊${note}。點列開啟詳情，點欄位標題排序。</p>
+    ${posts.length ? sortableTable(id, cols, posts, { onRow: true }) : empty("還沒有抓到任何貼文")}</section>`;
+}
+
+async function viewQuick(el) {
+  clearTimers();
+  S.quickHours ||= 6;
+  S.quickVisit ??= true;
+  const h = S.quickHours;
+  const [st, d, latest] = await Promise.all([api("/api/crawl/status"), api(`/api/ws/recent?hours=${h}`), fetchLatest(), loadWorkspaceLists()]);
+  const topics = S.topics.filter((t) => t.enabled);
+  const accounts = S.accounts.filter((a) => a.enabled);
+  const nothing = !topics.length && !accounts.length;
+  const last = d.last_run;
+  const fresh = new Set(last?.new_codes || []);
+  const quickRunning = st.running && st.trigger === "quick";
+  const status = !st.running ? "目前閒置"
+    : quickRunning ? `立即爬文中（run #${st.runId}，近 ${st.hours} 小時，${twTime(st.startedAt)} 開始）`
+    : `有一般抓取正在進行（run #${st.runId}），結束後才能立即爬文`;
+  const lastLine = last ? `上次立即爬文：${twFull(last.started_at)}（近 ${last.window_hours} 小時・${esc(last.started_by || "")}）— ${RUN_ST[last.status] || esc(last.status)}，新收 ${fmt(last.posts_new)} 篇、已抓過略過 ${fmt(last.posts_skipped)} 篇${last.posts_visited ? `、點進 ${fmt(last.posts_visited)} 篇` : ""}${last.logged_out ? "・遇到登入牆" : ""}` : "";
+  const draw = () => {
+    el.innerHTML = `
+      <section class="card"><h2>立即爬文</h2>
+        <p class="sub">馬上抓一次這個工作區的主題與帳號，<strong>只收近 ${h} 小時內發布、資料庫裡還沒有的貼文</strong>。抓過的一律略過：不重複收錄、不重新點進去。通常 1–5 分鐘。</p>
+        ${nothing ? `<div class="note">這個工作區還沒有啟用中的主題或帳號，先到「<a href="#/manage">監測設定</a>」新增。</div>`
+          : `<p class="small muted">範圍：主題 ${topics.map((t) => esc((t.type === "hashtag" ? "#" : "") + t.term)).join("、") || "無"}・帳號 ${accounts.map((a) => "@" + esc(a.handle)).join("、") || "無"}</p>`}
+        <div class="form-row">
+          <label class="field">時間範圍<select id="qHours">${QUICK_HOURS.map((x) => `<option value="${x}" ${x === h ? "selected" : ""}>近 ${x} 小時</option>`).join("")}</select></label>
+          <label class="check" style="min-height:34px"><input type="checkbox" id="qVisit" ${S.quickVisit ? "checked" : ""}> 點進新貼文抓留言與瀏覽數（每篇多約 10 秒）</label>
+          <button class="btn primary" id="qGo" ${st.running || nothing || !can("editor") ? "disabled" : ""}>立即爬文</button>
+          ${can("editor") ? "" : `<span class="muted small">需要「編輯」以上權限</span>`}
+        </div>
+        <p style="margin:12px 0 0"><span class="status-dot ${st.running ? "run" : ""}"></span>${status}</p>
+        ${quickRunning ? `<pre class="log" id="qLog" style="margin-top:10px">${esc(st.log.join("\n") || "（啟動中…）")}</pre>`
+          : last ? `<p class="muted small" style="margin:6px 0 0">${lastLine} <button class="link small" id="qLastLog" type="button">看紀錄</button></p>` : ""}
+      </section>
+      ${latestPostsCard("t-recent", latest, (p) => fresh.has(p.code), `${fresh.size ? "；標「新」的是上次立即爬文新收的" : ""}；近 ${h} 小時內發布的有 ${fmt(d.posts.length)} 篇`)}`;
+    bindTable("t-recent", latest, draw, (p) => (location.hash = `#/post/${p.code}`));
+    $("#qHours").addEventListener("change", (e) => { S.quickHours = Number(e.target.value); viewQuick(el); });
+    $("#qVisit").addEventListener("change", (e) => { S.quickVisit = e.target.checked; });
+    $("#qGo").addEventListener("click", async () => {
+      try { await api("/api/ws/quick-crawl", { body: { hours: S.quickHours, visit: S.quickVisit } }); toast("已開始立即爬文"); viewQuick(el); } catch (e) { toast(e.message, true); }
+    });
+    $("#qLastLog")?.addEventListener("click", async () => {
+      const r = await api(`/api/ws/runs/${last.id}/log`);
+      modal(`<h2>run #${last.id} 紀錄</h2><pre class="log" style="max-height:60vh">${esc(r.log || "（無紀錄）")}</pre>`);
+    });
+  };
+  draw();
+
+  // 有抓取在跑就每 2 秒更新紀錄；跑完自動重新整理列表（離開這頁就停）
+  if (st.running) {
+    S.timers.push(setInterval(async () => {
+      const s = await api("/api/crawl/status").catch(() => null);
+      if (!s) return;
+      const log = $("#qLog");
+      if (log) { log.textContent = s.log.join("\n"); log.scrollTop = log.scrollHeight; }
+      if (!s.running && location.hash.startsWith("#/quick")) viewQuick(el);
+    }, 2000));
+  }
+}
+
 // ── 後台：抓取與排程 ─────────────────────────────────────────────────
 async function viewCrawl(el) {
-  const [st, runs] = await Promise.all([api("/api/crawl/status"), api("/api/ws/runs")]);
-  const ST = { success: "完成", failed: "失敗", running: "進行中", interrupted: "中斷" };
+  const [st, runs, latest] = await Promise.all([api("/api/crawl/status"), api("/api/ws/runs"), fetchLatest()]);
+  // 最近一次抓取開始後才第一次看到的貼文，就是這次新收的
+  const lastStart = runs[0]?.started_at;
   const dur = (r) => (r.finished_at ? `${Math.max(1, Math.round((Date.parse(r.finished_at) - Date.parse(r.started_at)) / 60000))} 分` : "—");
   el.innerHTML = `
     <section class="card"><h2>立即抓取</h2>
-      <p class="sub">會開一個 Chrome 視窗自動搜尋與捲動，所有工作區的主題與帳號一起抓。依主題與帳號數量，通常 3–15 分鐘。</p>
+      <p class="sub">會開一個 Chrome 視窗自動搜尋與捲動，所有工作區的主題與帳號一起抓。依主題與帳號數量，通常 3–15 分鐘。只想補最新幾小時的貼文，用「<a href="#/quick">立即爬文</a>」比較快。</p>
       <p><span class="status-dot ${st.running ? "run" : ""}"></span>${st.running ? `抓取中（run #${st.runId}，${twTime(st.startedAt)} 開始）` : "目前閒置"}
         ${st.next ? `<span class="muted small">・下一次排程：${twFull(st.next)}</span>` : `<span class="muted small">・排程未啟用</span>`}</p>
       <button class="btn primary" id="crawlNow" ${st.running || !can("editor") ? "disabled" : ""}>立即抓取</button>
       ${can("editor") ? "" : `<span class="muted small">需要「編輯」以上權限</span>`}
       <h3>即時紀錄</h3><pre class="log" id="liveLog">${esc(st.log.join("\n") || "（尚無）")}</pre>
     </section>
+    ${latestPostsCard("t-latest", latest, (p) => !!lastStart && p.first_seen >= lastStart, lastStart ? "；標「新」的是最近一次抓取新收的" : "")}
     <section class="card"><h2>抓取紀錄</h2>
       ${runs.length ? `<div class="table-wrap"><table class="data"><thead><tr><th>#</th><th>開始</th><th>觸發</th><th>耗時</th><th>狀態</th><th class="num">主題收錄</th><th class="num">新貼文</th><th class="num">略過重複</th><th class="num">帳號</th><th class="num">點進</th><th class="num">留言</th><th></th></tr></thead><tbody>
-        ${runs.map((r) => `<tr><td class="num">${r.id}</td><td class="nowrap">${twTime(r.started_at)}</td><td>${r.trigger === "schedule" ? "排程" : esc(r.started_by || "手動")}</td><td>${dur(r)}</td>
-          <td>${ST[r.status] || r.status}${r.logged_out ? ' <span class="badge">登入牆</span>' : ""}${r.error ? `<div class="flag">${esc(r.error)}</div>` : ""}</td>
+        ${runs.map((r) => `<tr><td class="num">${r.id}</td><td class="nowrap">${twTime(r.started_at)}</td><td>${esc(triggerName(r))}</td><td>${dur(r)}</td>
+          <td>${RUN_ST[r.status] || r.status}${r.logged_out ? ' <span class="badge">登入牆</span>' : ""}${r.error ? `<div class="flag">${esc(r.error)}</div>` : ""}</td>
           <td class="num">${fmt(r.posts_found)}</td><td class="num">${fmt(r.posts_new)}</td><td class="num">${fmt(r.posts_skipped)}</td><td class="num">${fmt(r.profiles_seen)}</td><td class="num">${fmt(r.posts_visited)}</td><td class="num">${fmt(r.comments_found)}</td>
           <td><button class="btn sm" data-log="${r.id}">紀錄</button></td></tr>`).join("")}
       </tbody></table></div>` : empty("還沒有抓取紀錄")}
     </section>
     <div class="note">排程時間在「系統設定」調整（僅系統擁有者）。排程只在伺服器開著時執行，電腦關機或伺服器沒開那一次就會略過。</div>`;
 
+  bindTable("t-latest", latest, () => viewCrawl(el), (p) => (location.hash = `#/post/${p.code}`));
   $("#crawlNow")?.addEventListener("click", async () => {
     try { await api("/api/ws/crawl", { body: {} }); toast("已開始抓取"); viewCrawl(el); } catch (e) { toast(e.message, true); }
   });
@@ -824,11 +980,29 @@ async function viewMe(el) {
 }
 
 // ── 登入／首次設定 ───────────────────────────────────────────────────
-async function showAuth() {
+// 登入成功後把帳密交給瀏覽器的密碼管理器（Chrome／Edge 會跳出「儲存密碼」）；
+// 下次開頁面先用已儲存的帳密靜默登入。帳密只存在瀏覽器裡，不寫進 localStorage。
+const canUseCredentials = () => "PasswordCredential" in window && !!navigator.credentials;
+
+async function trySilentLogin() {
+  if (S.silentTried || !canUseCredentials()) return false;
+  S.silentTried = true; // 每次載入只試一次，避免登入失敗時來回重試
+  try {
+    const cred = await navigator.credentials.get({ password: true, mediation: "silent" });
+    if (!cred?.password) return false;
+    const res = await fetch("/api/login", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ username: cred.id, password: cred.password, remember: true }) });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+async function showAuth({ silent = true } = {}) {
   S.me = null;
   destroyCharts();
   clearTimers();
   const { needsSetup } = await fetch("/api/setup-status").then((r) => r.json()).catch(() => ({ needsSetup: false }));
+  if (!needsSetup && silent && (await trySilentLogin())) return boot();
   $("#app").hidden = true;
   const box = $("#auth");
   box.hidden = false;
@@ -839,15 +1013,21 @@ async function showAuth() {
     ${needsSetup ? `<label class="field">顯示名稱<input name="display_name" type="text"></label>` : ""}
     <label class="field">密碼${needsSetup ? "（至少 8 字元）" : ""}<input name="password" type="password" autocomplete="${needsSetup ? "new-password" : "current-password"}" required></label>
     ${needsSetup ? `<label class="field">第一個工作區名稱<input name="workspace_name" type="text" value="世新大學輿情"></label>` : ""}
+    ${needsSetup ? "" : `<label class="check small" style="margin-top:12px"><input type="checkbox" name="remember" checked> 記住我（30 天內免重新登入）</label>`}
     <button class="btn primary">${needsSetup ? "建立並登入" : "登入"}</button>
     <div class="error" id="authErr"></div>
   </form></div>`;
   $("#authForm").addEventListener("submit", async (e) => {
     e.preventDefault();
-    const body = Object.fromEntries(new FormData(e.target));
+    const f = e.target;
+    const body = Object.fromEntries(new FormData(f));
+    body.remember = needsSetup ? true : f.remember.checked;
     const res = await fetch(needsSetup ? "/api/setup" : "/api/login", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) { $("#authErr").textContent = data.error || "失敗"; return; }
+    if (canUseCredentials()) {
+      try { await navigator.credentials.store(new PasswordCredential({ id: body.username, password: body.password, name: body.display_name || body.username })); } catch {}
+    }
     box.hidden = true;
     boot();
   });
@@ -880,8 +1060,10 @@ async function boot(keepRoute = false) {
 
 async function logout() {
   await fetch("/api/logout", { method: "POST" });
+  // 登出後瀏覽器不要馬上用儲存的密碼自動登入回來；下次手動登入後會恢復
+  if (navigator.credentials?.preventSilentAccess) await navigator.credentials.preventSilentAccess().catch(() => {});
   S.ws = null;
-  showAuth();
+  showAuth({ silent: false });
 }
 
 async function crawlBadge() {

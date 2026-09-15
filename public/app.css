@@ -118,6 +118,7 @@ button.link { background: none; border: 0; color: var(--accent); cursor: pointer
 /* ── 標籤 ── */
 .badge { display: inline-block; font-size: 11.5px; padding: 1px 7px; border-radius: 999px; background: var(--surface-2); color: var(--text-secondary); white-space: nowrap; }
 .badge.own { background: var(--accent); color: var(--accent-ink); }
+.badge.new { background: var(--ramp-100); color: var(--ramp-650); font-weight: 600; }
 .sent { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; white-space: nowrap; color: var(--text-secondary); }
 .sent::before { content: ""; width: 8px; height: 8px; border-radius: 2px; background: var(--sent-neu); }
 .sent.pos::before { background: var(--sent-pos); }
@@ -167,6 +168,24 @@ button.link { background: none; border: 0; color: var(--accent); cursor: pointer
 .modal { background: var(--surface); border-radius: 12px; padding: 18px; width: min(760px, 100%); max-height: 86vh; overflow: auto; }
 #toast { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%); background: var(--text); color: var(--page); padding: 8px 14px; border-radius: 8px; font-size: 13px; z-index: 30; max-width: calc(100% - 32px); }
 #toast.bad { background: var(--critical); color: #fff; }
+
+/* ── 負面留言板：嚴重度用固定的狀態色，一定搭配圖示與文字 ── */
+.sev { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; font-weight: 600; padding: 2px 8px; border-radius: 999px; white-space: nowrap; }
+.sev.high { background: #d03b3b; color: #fff; }
+.sev.mid { background: #ec835a; color: #0b0b0b; }
+.sev.low { background: #fab219; color: #0b0b0b; }
+.board { list-style: none; margin: 0; padding: 0; }
+.board .item { display: grid; grid-template-columns: 72px minmax(0, 1fr); gap: 10px; padding: 12px 0; border-bottom: 1px solid var(--grid); }
+.board .item:last-child { border-bottom: 0; }
+.board .text { white-space: pre-wrap; word-break: break-word; font-size: 14px; }
+.board mark { background: rgba(227, 73, 72, 0.2); color: inherit; border-radius: 3px; padding: 0 2px; }
+.board .reply-to { color: var(--text-secondary); font-size: 12.5px; margin-top: 4px; }
+.board .meta { color: var(--text-secondary); font-size: 12px; display: flex; flex-wrap: wrap; gap: 4px 10px; margin-top: 4px; }
+.hits { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+.hit { font-size: 11.5px; padding: 1px 7px; border-radius: 999px; background: var(--surface-2); color: var(--text-secondary); white-space: nowrap; }
+.hit b { font-weight: 600; color: var(--text); }
+button.hit { border: 0; cursor: pointer; }
+button.hit:hover { background: var(--grid); }
 
 @media (max-width: 900px) {
   .grid2 { grid-template-columns: minmax(0, 1fr); }

@@ -4,7 +4,7 @@ import express from "express";
 import path from "path";
 import { db, ROOT, now, getRawSettings, setSettings, createWorkspace, tx } from "./db.js";
 import {
-  COOKIE, needsSetup, validateCredentials, createUser, checkLogin, createSession, destroySession, sessionToken,
+  COOKIE, needsSetup, validateCredentials, createUser, checkLogin, createSession, renewSession, destroySession, sessionToken,
   setPassword, verifyPassword, userWorkspaces, requireUser, requireOwner, withWorkspace,
 } from "./auth.js";
 import * as A from "./analytics.js";
@@ -12,6 +12,7 @@ import { reanalyzeAll } from "./analyze.js";
 import { startCrawl, state as crawlState } from "./crawler.js";
 import { startScheduler, nextRunAt } from "./scheduler.js";
 import { buildWorkbook, postsCsv } from "./report.js";
+import { negativeBoard, negativeCsv } from "./negative.js";
 
 const HOST = process.env.HOST || "127.0.0.1";
 const PORT = Number(process.env.PORT || 3900);
@@ -33,8 +34,12 @@ const filters = (req) => ({
   limit: req.query.limit,
 });
 const bad = (res, msg, code = 400) => res.status(code).json({ error: msg });
-const setCookie = (res, token, maxAge) =>
-  res.setHeader("Set-Cookie", `${COOKIE}=${token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${maxAge}`);
+// maxAge 為 null：瀏覽器關閉即失效；經 Cloudflare 等 HTTPS 代理連進來時加上 Secure
+const setCookie = (req, res, token, maxAge) => {
+  const secure = req.headers["x-forwarded-proto"] === "https" ? "; Secure" : "";
+  const age = maxAge == null ? "" : `; Max-Age=${maxAge}`;
+  res.setHeader("Set-Cookie", `${COOKIE}=${token}; HttpOnly; SameSite=Lax; Path=/${age}${secure}`);
+};
 const cleanHandle = (h) => String(h || "").trim().replace(/^@/, "").replace(/^https?:\/\/(www\.)?threads\.(net|com)\/@?/, "").replace(/[/?#].*$/, "");
 
 // ── 首次設定、登入 ─────────────────────────────────────────────────────
@@ -51,27 +56,33 @@ app.post("/api/setup", (req, res) => {
     db.prepare("INSERT INTO topics (workspace_id, type, term, max_days, enabled, created_at) VALUES (?, 'keyword', '世新', 3, 1, ?)").run(wsId, now());
     return id;
   });
-  const s = createSession(userId);
-  setCookie(res, s.token, s.maxAge);
+  const s = createSession(userId, true);
+  setCookie(req, res, s.token, s.maxAge);
   res.json({ ok: true });
 });
 
+// remember 預設為 true（記住我 30 天）；前端沒勾時送 false
 app.post("/api/login", (req, res) => {
-  const { username, password } = req.body || {};
+  const { username, password, remember } = req.body || {};
   const r = checkLogin(String(username || ""), String(password || ""));
   if (r.error) return bad(res, r.error, 401);
-  const s = createSession(r.user.id);
-  setCookie(res, s.token, s.maxAge);
+  const s = createSession(r.user.id, remember !== false);
+  setCookie(req, res, s.token, s.maxAge);
   res.json({ ok: true });
 });
 
 app.post("/api/logout", (req, res) => {
   destroySession(sessionToken(req));
-  setCookie(res, "", 0);
+  setCookie(req, res, "", 0);
   res.json({ ok: true });
 });
 
-app.get("/api/me", requireUser, (req, res) => res.json({ user: req.user, workspaces: userWorkspaces(req.user) }));
+// 每次開頁面都會打這支：記住我的 session 快到期時順便延長，天天用就不會被登出
+app.get("/api/me", requireUser, (req, res) => {
+  const renewed = renewSession(sessionToken(req));
+  if (renewed) setCookie(req, res, sessionToken(req), renewed.maxAge);
+  res.json({ user: req.user, workspaces: userWorkspaces(req.user) });
+});
 
 app.post("/api/me/password", requireUser, (req, res) => {
   const { current, next } = req.body || {};
@@ -79,8 +90,8 @@ app.post("/api/me/password", requireUser, (req, res) => {
   if (!verifyPassword(String(current || ""), u.pass_salt, u.pass_hash)) return bad(res, "目前密碼不正確");
   if (String(next || "").length < 8) return bad(res, "新密碼至少 8 個字元");
   setPassword(u.id, next);
-  const s = createSession(u.id);
-  setCookie(res, s.token, s.maxAge);
+  const s = createSession(u.id, true);
+  setCookie(req, res, s.token, s.maxAge);
   res.json({ ok: true });
 });
 
@@ -117,6 +128,16 @@ ws.get("/accounts/compare", view, (req, res) => {
 });
 ws.get("/best-times", view, (req, res) => res.json(A.bestTimes(req.ws.id, filters(req))));
 ws.get("/patterns", view, (req, res) => res.json(A.successPatterns(req.ws.id, filters(req))));
+
+// 負面留言板：level（high／mid／low）、type（comment／post／all）另外帶
+const negFilters = (req) => ({ ...filters(req), level: req.query.level, type: req.query.type });
+ws.get("/negative", view, (req, res) => res.json(negativeBoard(req.ws.id, negFilters(req))));
+ws.get("/negative.csv", view, (req, res) => {
+  const d = negativeBoard(req.ws.id, { ...negFilters(req), all: true });
+  res.setHeader("Content-Type", "text/csv; charset=utf-8");
+  res.setHeader("Content-Disposition", "attachment; filename=negative.csv");
+  res.send(negativeCsv(d.items));
+});
 
 ws.get("/export.xlsx", view, async (req, res) => {
   const wb = buildWorkbook(req.ws, days(req));
@@ -197,8 +218,26 @@ ws.post("/crawl", edit, (req, res) => {
   res.json({ ok: true, runId: r.runId });
 });
 
+// 立即爬文：只抓這個工作區、近 N 小時發布、還沒抓過的貼文
+const hoursOf = (v) => Math.min(Math.max(Math.round(Number(v)) || 6, 1), 48);
+ws.post("/quick-crawl", edit, (req, res) => {
+  const r = startCrawl("quick", req.user.display_name || req.user.username,
+    { hours: hoursOf(req.body?.hours), wsId: req.ws.id, visit: req.body?.visit !== false });
+  if (!r.ok) return bad(res, r.error, 409);
+  res.json({ ok: true, runId: r.runId });
+});
+
+// 立即爬文頁：近 N 小時的貼文 ＋ 這個工作區最近一次立即爬文新收了哪些
+ws.get("/recent", view, (req, res) => {
+  const hours = hoursOf(req.query.hours);
+  const last = db.prepare(`SELECT id, started_by, started_at, finished_at, status, window_hours, logged_out, posts_new, posts_skipped,
+      posts_visited, comments_found, error, new_codes FROM runs WHERE trigger = 'quick' AND workspace_id = ? ORDER BY id DESC LIMIT 1`).get(req.ws.id);
+  if (last) last.new_codes = JSON.parse(last.new_codes || "[]");
+  res.json({ hours, posts: A.postsList(req.ws.id, { hours, sort: "newest", limit: 500 }), last_run: last || null });
+});
+
 ws.get("/runs", view, (req, res) =>
-  res.json(db.prepare("SELECT id, trigger, started_by, started_at, finished_at, status, logged_out, posts_found, posts_new, posts_skipped, posts_visited, profiles_seen, comments_found, comments_new, error FROM runs ORDER BY id DESC LIMIT 30").all()));
+  res.json(db.prepare("SELECT id, trigger, started_by, started_at, finished_at, status, window_hours, logged_out, posts_found, posts_new, posts_skipped, posts_visited, profiles_seen, comments_found, comments_new, error FROM runs ORDER BY id DESC LIMIT 30").all()));
 
 ws.get("/runs/:id/log", view, (req, res) => {
   const r = db.prepare("SELECT log FROM runs WHERE id = ?").get(Number(req.params.id));
@@ -249,7 +288,8 @@ app.use("/api/ws", ws);
 
 // ── 抓取狀態（所有登入者都能看）──────────────────────────────────────
 app.get("/api/crawl/status", requireUser, (req, res) =>
-  res.json({ running: crawlState.running, runId: crawlState.runId, startedAt: crawlState.startedAt, log: crawlState.log.slice(-80), next: nextRunAt() }));
+  res.json({ running: crawlState.running, runId: crawlState.runId, trigger: crawlState.trigger, hours: crawlState.hours,
+    startedAt: crawlState.startedAt, log: crawlState.log.slice(-80), next: nextRunAt() }));
 
 // ── 系統（只有擁有者）────────────────────────────────────────────────
 const sys = express.Router();

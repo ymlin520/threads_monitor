@@ -50,7 +50,8 @@ const SORTS = {
 export function postsList(ws, f = {}) {
   const params = { ws };
   const where = [];
-  if (f.days > 0) { where.push("p.posted_at >= :since"); params.since = sinceISO(f.days); }
+  if (f.hours > 0) { where.push("p.posted_at >= :since"); params.since = new Date(Date.now() - f.hours * 3600000).toISOString(); }
+  else if (f.days > 0) { where.push("p.posted_at >= :since"); params.since = sinceISO(f.days); }
   if (f.topicId) { where.push("EXISTS (SELECT 1 FROM post_topics x WHERE x.post_code = p.code AND x.topic_id = :tid)"); params.tid = Number(f.topicId); }
   if (f.handle) { where.push("p.author = :handle"); params.handle = String(f.handle).replace(/^@/, ""); }
   if (f.kind) { where.push("p.author IN (SELECT handle FROM accounts WHERE workspace_id = :ws AND kind = :kind)"); params.kind = f.kind; }

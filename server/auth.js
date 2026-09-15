@@ -2,7 +2,9 @@
 import crypto from "crypto";
 import { db, now } from "./db.js";
 
-const SESSION_DAYS = 14;
+// 勾「記住我」：30 天，使用中剩不到一半效期會自動延長；沒勾：12 小時、關掉瀏覽器就要重新登入
+const REMEMBER_DAYS = 30;
+const SHORT_HOURS = 12;
 export const COOKIE = "tm_session";
 const ROLE_RANK = { viewer: 1, editor: 2, admin: 3 };
 
@@ -51,11 +53,23 @@ export function checkLogin(username, password) {
   return { user: u };
 }
 
-export function createSession(userId) {
+// maxAge 為 null 表示瀏覽器關閉即失效的 cookie
+export function createSession(userId, remember = true) {
   const token = crypto.randomBytes(32).toString("hex");
-  const expires = new Date(Date.now() + SESSION_DAYS * 86400000).toISOString();
-  db.prepare("INSERT INTO sessions (token, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)").run(token, userId, now(), expires);
-  return { token, maxAge: SESSION_DAYS * 86400 };
+  const ms = remember ? REMEMBER_DAYS * 86400000 : SHORT_HOURS * 3600000;
+  db.prepare("INSERT INTO sessions (token, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)")
+    .run(token, userId, now(), new Date(Date.now() + ms).toISOString());
+  return { token, maxAge: remember ? REMEMBER_DAYS * 86400 : null };
+}
+
+// 記住我的 session（效期超過一天的）剩不到一半時延長回 30 天；回傳新的 cookie 效期，不需延長則回傳 null
+export function renewSession(token) {
+  const s = token && db.prepare("SELECT created_at, expires_at FROM sessions WHERE token = ?").get(token);
+  if (!s) return null;
+  const remember = Date.parse(s.expires_at) - Date.parse(s.created_at) > 86400000;
+  if (!remember || Date.parse(s.expires_at) - Date.now() > (REMEMBER_DAYS / 2) * 86400000) return null;
+  db.prepare("UPDATE sessions SET expires_at = ? WHERE token = ?").run(new Date(Date.now() + REMEMBER_DAYS * 86400000).toISOString(), token);
+  return { maxAge: REMEMBER_DAYS * 86400 };
 }
 
 export function destroySession(token) {

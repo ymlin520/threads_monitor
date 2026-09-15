@@ -6,6 +6,9 @@
 // 收錄規則（系統設定 revisit_old 關閉時，預設）：
 //   1. 已經抓過的貼文不再重抓、不再點進去（只補上主題關聯）
 //   2. 主題搜尋的新貼文：今天有就只收今天的；今天沒有才收近 max_days 天的
+//
+// 立即爬文（startCrawl 帶 hours）：只抓發起的工作區，只收近 hours 小時發布、還沒抓過的貼文，
+// 不套用「今天優先」、不回頭更新舊貼文，也只點進這次新抓到的貼文。
 import { chromium } from "playwright";
 import fs from "fs";
 import path from "path";
@@ -15,10 +18,12 @@ import { analyze, dictFrom } from "./analyze.js";
 const BASE = "https://www.threads.com";
 const AUTH_FILE = path.join(DATA_DIR, "auth_state.json");
 const DAY = 86400000;
+const HOUR = 3600000;
 const SEARCH_SCROLLS = 12;
 const POST_SCROLLS = 3;
 
-export const state = { running: false, runId: null, startedAt: null, log: [] };
+// newCodes：這次新收的貼文，結束時寫進 runs.new_codes
+export const state = { running: false, runId: null, trigger: null, hours: null, startedAt: null, log: [], newCodes: new Set() };
 
 function log(msg) {
   const t = new Date().toLocaleTimeString("zh-TW", { hour12: false, timeZone: "Asia/Taipei" });
@@ -197,9 +202,10 @@ function insertSnapshot(code, runId, c, views = null) {
 
 function finishRun(runId, status, stats = {}, error = null) {
   db.prepare(`UPDATE runs SET finished_at = ?, status = ?, logged_out = ?, posts_found = ?, posts_new = ?, posts_skipped = ?,
-      posts_visited = ?, profiles_seen = ?, comments_found = ?, comments_new = ?, error = ?, log = ? WHERE id = ?`)
+      posts_visited = ?, profiles_seen = ?, comments_found = ?, comments_new = ?, error = ?, log = ?, new_codes = ? WHERE id = ?`)
     .run(now(), status, stats.logged_out || 0, stats.posts_found || 0, stats.posts_new || 0, stats.posts_skipped || 0,
-      stats.posts_visited || 0, stats.profiles_seen || 0, stats.comments_found || 0, stats.comments_new || 0, error, state.log.join("\n"), runId);
+      stats.posts_visited || 0, stats.profiles_seen || 0, stats.comments_found || 0, stats.comments_new || 0, error, state.log.join("\n"),
+      JSON.stringify([...state.newCodes]), runId);
 }
 
 // ── 抓取步驟 ─────────────────────────────────────────────────────────
@@ -218,10 +224,11 @@ async function scrollCollect(page, scrolls, stopAtWall) {
 }
 
 // group = { type, term, max_days, topics: [{ id, max_days }] }
-async function searchTopic(page, group, dict, stats, revisit) {
+// hours：立即爬文的時間窗；有值時只收近 hours 小時的新貼文，不套用「今天優先」
+async function searchTopic(page, group, dict, stats, revisit, hours) {
   const serp = group.type === "hashtag" ? "tags" : "default";
   const label = group.type === "hashtag" ? `#${group.term}` : `「${group.term}」`;
-  log(`搜尋 ${label}（今天優先，沒有才收近 ${group.max_days} 天）`);
+  log(hours ? `搜尋 ${label}（近 ${hours} 小時）` : `搜尋 ${label}（今天優先，沒有才收近 ${group.max_days} 天）`);
   await page.goto(`${BASE}/search?q=${encodeURIComponent(group.term)}&serp_type=${serp}`, { waitUntil: "domcontentloaded" }).catch(() => {});
   await page.waitForTimeout(7000);
 
@@ -240,15 +247,16 @@ async function searchTopic(page, group, dict, stats, revisit) {
     log(`  一篇都沒掃到${/login|challenge|checkpoint/.test(u) ? `（被導向 ${u}，疑似被擋）` : ""}`);
   }
 
-  // 先挑出符合關鍵字、且在天數內的貼文
+  // 先挑出符合關鍵字、且在天數（立即爬文：小時）內的貼文
   const term = group.term.toLowerCase();
+  const since = Date.now() - (hours ? hours * HOUR : group.max_days * DAY);
   const inWindow = [];
   for (const b of boxes.values()) {
     const p = boxToPost(b);
     // 關鍵字：內文或主題要含這個字；標籤：直接採用 Threads 標籤搜尋的結果
     if (group.type === "keyword" && !p.content.toLowerCase().includes(term) && !p.topic.toLowerCase().includes(term)) continue;
     const t = Date.parse(p.posted_at);
-    if (Number.isNaN(t) || t < Date.now() - group.max_days * DAY) continue;
+    if (Number.isNaN(t) || t < since) continue;
     inWindow.push({ p, t });
   }
 
@@ -263,25 +271,27 @@ async function searchTopic(page, group, dict, stats, revisit) {
     if (revisit) { upsertPost(x.p, dict); matched.set(x.p.code, x.p.counts); }
   }
   const today = twDate(Date.now());
-  const todays = fresh.filter((x) => twDate(x.t) === today);
+  const todays = hours ? [] : fresh.filter((x) => twDate(x.t) === today);
   const picked = todays.length ? todays : fresh;
   for (const x of picked) {
     upsertPost(x.p, dict);
     linkTopics(group, x.p.code, x.t);
     matched.set(x.p.code, x.p.counts);
+    state.newCodes.add(x.p.code);
   }
 
   stats.posts_found += picked.length;
   stats.posts_new += picked.length;
   stats.posts_skipped += dupes;
   const rule = !fresh.length ? "沒有新貼文"
+    : hours ? `收 ${picked.length} 篇`
     : todays.length ? `今天有 ${todays.length} 篇，只收今天的${fresh.length > todays.length ? `（前幾天的 ${fresh.length - todays.length} 篇不收）` : ""}`
     : `今天沒有，改收近 ${group.max_days} 天的 ${picked.length} 篇`;
-  log(`  掃到 ${boxes.size} 篇，符合 ${inWindow.length} 篇，已抓過略過 ${dupes} 篇 → ${rule}${loggedOut ? "（遇到登入牆）" : ""}`);
+  log(`  掃到 ${boxes.size} 篇，${hours ? `近 ${hours} 小時內` : "符合"} ${inWindow.length} 篇，已抓過略過 ${dupes} 篇 → ${rule}${loggedOut ? "（遇到登入牆）" : ""}`);
   return matched;
 }
 
-async function visitProfile(page, handle, runId, dict, stats, scrolls, revisit) {
+async function visitProfile(page, handle, runId, dict, stats, scrolls, revisit, hours) {
   log(`帳號 @${handle}`);
   await page.goto(`${BASE}/@${handle}`, { waitUntil: "domcontentloaded" }).catch(() => {});
   await page.waitForTimeout(jitter(6000, 8000));
@@ -304,20 +314,25 @@ async function visitProfile(page, handle, runId, dict, stats, scrolls, revisit) 
   }
 
   const { boxes } = await scrollCollect(page, scrolls, false);
+  const since = hours ? Date.now() - hours * HOUR : 0;
   const matched = new Map();
+  let seen = 0;
   let fresh = 0;
   let skipped = 0;
+  let older = 0;
   for (const b of boxes.values()) {
     if (b.handle !== handle) continue; // 轉發別人的貼文不算
+    seen++;
     const p = boxToPost(b);
+    if (since && !(Date.parse(p.posted_at) >= since)) { older++; continue; } // 立即爬文只收時間窗內的
     if (postExists(p.code) && !revisit) { skipped++; continue; }
-    if (upsertPost(p, dict)) fresh++;
+    if (upsertPost(p, dict)) { fresh++; state.newCodes.add(p.code); }
     matched.set(p.code, p.counts);
   }
   stats.posts_new += fresh;
   stats.posts_skipped += skipped;
   stats.profiles_seen++;
-  log(`  粉絲 ${prof.followers ?? "—"}｜可見貼文 ${fresh + skipped + (revisit ? matched.size - fresh : 0)} 篇：新 ${fresh}、已抓過略過 ${skipped}`);
+  log(`  粉絲 ${prof.followers ?? "—"}｜可見貼文 ${seen} 篇：新 ${fresh}、已抓過略過 ${skipped}${hours ? `、超過 ${hours} 小時 ${older}` : ""}`);
   return matched;
 }
 
@@ -347,25 +362,31 @@ async function visitPost(page, target, runId, dict, stats) {
   return true;
 }
 
-async function crawl(runId) {
+// opts.hours 有值＝立即爬文：只抓 opts.wsId 這個工作區；opts.visit 決定要不要點進新抓到的貼文
+async function crawl(runId, { hours = 0, wsId = null, visit = true } = {}) {
   const s = getSettings();
   const dict = dictFrom(s);
+  const revisit = hours ? false : s.revisit_old;
+  const inWs = wsId ? " AND workspace_id = ?" : "";
+  const wsArgs = wsId ? [wsId] : [];
 
   const groups = new Map();
-  for (const t of db.prepare("SELECT id, type, term, max_days FROM topics WHERE enabled = 1 ORDER BY id").all()) {
+  for (const t of db.prepare(`SELECT id, type, term, max_days FROM topics WHERE enabled = 1${inWs} ORDER BY id`).all(...wsArgs)) {
     const key = `${t.type}|${t.term.toLowerCase()}`;
     const g = groups.get(key) || { type: t.type, term: t.term, max_days: 0, topics: [] };
     g.max_days = Math.max(g.max_days, t.max_days);
     g.topics.push({ id: t.id, max_days: t.max_days });
     groups.set(key, g);
   }
-  const handles = db.prepare("SELECT DISTINCT handle FROM accounts WHERE enabled = 1 ORDER BY handle").all().map((r) => r.handle);
-  if (!groups.size && !handles.length) throw new Error("沒有啟用中的主題或帳號，請先到「監測設定」新增");
+  const handles = db.prepare(`SELECT DISTINCT handle FROM accounts WHERE enabled = 1${inWs} ORDER BY handle`).all(...wsArgs).map((r) => r.handle);
+  if (!groups.size && !handles.length) throw new Error(`${wsId ? "這個工作區" : ""}沒有啟用中的主題或帳號，請先到「監測設定」新增`);
 
   const stats = { logged_out: 0, posts_found: 0, posts_new: 0, posts_skipped: 0, posts_visited: 0, profiles_seen: 0, comments_found: 0, comments_new: 0 };
   const hasAuth = fs.existsSync(AUTH_FILE);
   log(hasAuth ? "使用 data/auth_state.json 的登入狀態" : "訪客模式（未登入）：每個主題約可見 7–12 篇、每個帳號約 10 篇、每篇約 25 則留言");
-  log(`本次：主題 ${groups.size} 個、帳號 ${handles.length} 個｜${s.revisit_old ? "會回頭更新已抓過的貼文" : "已抓過的貼文不重抓"}`);
+  log(hours
+    ? `立即爬文：只收近 ${hours} 小時發布、還沒抓過的貼文｜主題 ${groups.size} 個、帳號 ${handles.length} 個`
+    : `本次：主題 ${groups.size} 個、帳號 ${handles.length} 個｜${revisit ? "會回頭更新已抓過的貼文" : "已抓過的貼文不重抓"}`);
 
   const browser = await chromium.launch({ headless: s.headless, channel: s.browser_channel || undefined });
   try {
@@ -382,23 +403,35 @@ async function crawl(runId) {
     const listCounts = new Map();
     for (const g of groups.values()) {
       try {
-        for (const [code, c] of await searchTopic(page, g, dict, stats, s.revisit_old)) listCounts.set(code, c);
+        for (const [code, c] of await searchTopic(page, g, dict, stats, revisit, hours)) listCounts.set(code, c);
       } catch (e) { log(`  搜尋失敗：${e.message}`); }
     }
     for (const h of handles) {
       try {
-        for (const [code, c] of await visitProfile(page, h, runId, dict, stats, s.profile_scrolls, s.revisit_old)) listCounts.set(code, c);
+        const scrolls = hours ? Math.min(s.profile_scrolls, 2) : s.profile_scrolls; // 個人頁新的在上面，立即爬文不用捲太深
+        for (const [code, c] of await visitProfile(page, h, runId, dict, stats, scrolls, revisit, hours)) listCounts.set(code, c);
       } catch (e) { log(`  @${h} 失敗：${e.message}`); }
       await page.waitForTimeout(jitter(2000, 4000));
     }
 
-    // 逐篇點進去取瀏覽數與留言：預設只進還沒點過的；開啟 revisit_old 才會回頭更新近 track_days 天的舊貼文
-    const targets = db.prepare(`SELECT p.code, p.url FROM posts p WHERE p.posted_at >= :since
-        ${s.revisit_old ? "" : "AND p.visited_at IS NULL"} AND (
-        EXISTS (SELECT 1 FROM post_topics x JOIN topics t ON t.id = x.topic_id WHERE x.post_code = p.code AND t.enabled = 1)
-        OR p.author IN (SELECT handle FROM accounts WHERE enabled = 1))
-      ORDER BY p.posted_at DESC LIMIT :lim`).all({ since: new Date(Date.now() - s.track_days * DAY).toISOString(), lim: s.max_post_visits });
-    log(`逐篇進貼文頁：${targets.length} 篇（${s.revisit_old ? "含已抓過的" : "只進還沒抓過的"}，近 ${s.track_days} 天，上限 ${s.max_post_visits} 篇）`);
+    // 逐篇點進去取瀏覽數與留言：
+    //   立即爬文只進這次新抓到的貼文；
+    //   一般抓取預設只進還沒點過的，開啟 revisit_old 才會回頭更新近 track_days 天的舊貼文
+    let targets;
+    if (hours) {
+      targets = visit
+        ? db.prepare("SELECT code, url FROM posts WHERE code IN (SELECT value FROM json_each(?)) ORDER BY posted_at DESC LIMIT ?")
+          .all(JSON.stringify([...state.newCodes]), s.max_post_visits)
+        : [];
+      log(visit ? `逐篇進貼文頁：這次新抓到的 ${targets.length} 篇（上限 ${s.max_post_visits} 篇）` : "不點進貼文頁（只存列表上的內文與互動數）");
+    } else {
+      targets = db.prepare(`SELECT p.code, p.url FROM posts p WHERE p.posted_at >= :since
+          ${revisit ? "" : "AND p.visited_at IS NULL"} AND (
+          EXISTS (SELECT 1 FROM post_topics x JOIN topics t ON t.id = x.topic_id WHERE x.post_code = p.code AND t.enabled = 1)
+          OR p.author IN (SELECT handle FROM accounts WHERE enabled = 1))
+        ORDER BY p.posted_at DESC LIMIT :lim`).all({ since: new Date(Date.now() - s.track_days * DAY).toISOString(), lim: s.max_post_visits });
+      log(`逐篇進貼文頁：${targets.length} 篇（${revisit ? "含已抓過的" : "只進還沒抓過的"}，近 ${s.track_days} 天，上限 ${s.max_post_visits} 篇）`);
+    }
 
     const snapped = new Set();
     for (const t of targets) {
@@ -420,13 +453,14 @@ async function crawl(runId) {
   return stats;
 }
 
-// 背景啟動，立刻回傳 runId；進度看 state.log
-export function startCrawl(trigger = "manual", startedBy = null) {
+// 背景啟動，立刻回傳 runId；進度看 state.log。opts 見 crawl()
+export function startCrawl(trigger = "manual", startedBy = null, opts = {}) {
   if (state.running) return { ok: false, error: "已有抓取正在進行", runId: state.runId };
-  const r = db.prepare("INSERT INTO runs (trigger, started_by, started_at, status) VALUES (?, ?, ?, 'running')").run(trigger, startedBy, now());
+  const r = db.prepare("INSERT INTO runs (trigger, started_by, started_at, status, window_hours, workspace_id) VALUES (?, ?, ?, 'running', ?, ?)")
+    .run(trigger, startedBy, now(), opts.hours || null, opts.wsId || null);
   const runId = Number(r.lastInsertRowid);
-  Object.assign(state, { running: true, runId, startedAt: now(), log: [] });
-  const done = crawl(runId).catch((e) => {
+  Object.assign(state, { running: true, runId, trigger, hours: opts.hours || null, startedAt: now(), log: [], newCodes: new Set() });
+  const done = crawl(runId, opts).catch((e) => {
     log("失敗：" + e.message);
     finishRun(runId, "failed", {}, e.message);
   }).finally(() => { state.running = false; });

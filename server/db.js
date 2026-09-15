@@ -191,6 +191,10 @@ function addColumn(table, column, type, backfill) {
 addColumn("posts", "visited_at", "TEXT",
   "UPDATE posts SET visited_at = last_seen WHERE views IS NOT NULL OR code IN (SELECT DISTINCT post_code FROM comments)");
 addColumn("runs", "posts_skipped", "INTEGER DEFAULT 0");
+// 立即爬文：時間窗（小時）、發起的工作區、這次新收的貼文代碼（JSON 陣列）
+addColumn("runs", "window_hours", "INTEGER");
+addColumn("runs", "workspace_id", "INTEGER");
+addColumn("runs", "new_codes", "TEXT");
 
 // ── 系統設定（全域，只有系統擁有者能改）：全部存成字串 ──────────────
 const DEFAULTS = {
