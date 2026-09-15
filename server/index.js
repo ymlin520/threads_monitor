@@ -13,6 +13,7 @@ import { startCrawl, state as crawlState } from "./crawler.js";
 import { startScheduler, nextRunAt } from "./scheduler.js";
 import { buildWorkbook, postsCsv } from "./report.js";
 import { negativeBoard, negativeCsv } from "./negative.js";
+import { needMenu as menu, needBlock as block, listRoles, saveRole, deleteRole, assignRole, getRole, builtinRoleId, registry } from "./roles.js";
 
 const HOST = process.env.HOST || "127.0.0.1";
 const PORT = Number(process.env.PORT || 3900);
@@ -102,19 +103,19 @@ const view = withWorkspace("viewer");
 const edit = withWorkspace("editor");
 const admin = withWorkspace("admin");
 
-ws.get("/overview", view, (req, res) => res.json(A.overview(req.ws.id, days(req))));
-ws.get("/posts", view, (req, res) => res.json(A.postsList(req.ws.id, filters(req))));
+ws.get("/overview", view, menu("overview"), (req, res) => res.json(A.overview(req.ws.id, days(req))));
+ws.get("/posts", view, menu("posts", "topics", "quick", "crawl"), (req, res) => res.json(A.postsList(req.ws.id, filters(req))));
 ws.get("/posts/:code", view, (req, res) => {
   const d = A.postDetail(req.ws.id, req.params.code);
   if (!d) return bad(res, "找不到這篇貼文", 404);
   res.json(d);
 });
-ws.get("/topics/summary", view, (req, res) => res.json(A.topicSummary(req.ws.id, days(req))));
-ws.get("/topics/daily", view, (req, res) => res.json(A.topicDaily(req.ws.id, days(req))));
-ws.get("/views", view, (req, res) => res.json(A.viewsAnalysis(req.ws.id, filters(req))));
-ws.get("/accounts/summary", view, (req, res) => res.json(A.accountsSummary(req.ws.id, days(req))));
-ws.get("/accounts/followers", view, (req, res) => res.json(A.followerSeries(req.ws.id, days(req))));
-ws.get("/accounts/compare", view, (req, res) => {
+ws.get("/topics/summary", view, menu("topics", "compare"), (req, res) => res.json(A.topicSummary(req.ws.id, days(req))));
+ws.get("/topics/daily", view, menu("topics", "compare"), (req, res) => res.json(A.topicDaily(req.ws.id, days(req))));
+ws.get("/views", view, menu("views"), (req, res) => res.json(A.viewsAnalysis(req.ws.id, filters(req))));
+ws.get("/accounts/summary", view, menu("accounts"), (req, res) => res.json(A.accountsSummary(req.ws.id, days(req))));
+ws.get("/accounts/followers", view, menu("accounts"), (req, res) => res.json(A.followerSeries(req.ws.id, days(req))));
+ws.get("/accounts/compare", view, menu("accounts"), (req, res) => {
   const a = cleanHandle(req.query.a);
   const b = cleanHandle(req.query.b);
   if (!a || !b) return bad(res, "請選兩個帳號");
@@ -126,20 +127,20 @@ ws.get("/accounts/compare", view, (req, res) => {
     followers: A.followerSeries(req.ws.id, days(req)).series.filter((s) => s.handle === a || s.handle === b),
   });
 });
-ws.get("/best-times", view, (req, res) => res.json(A.bestTimes(req.ws.id, filters(req))));
-ws.get("/patterns", view, (req, res) => res.json(A.successPatterns(req.ws.id, filters(req))));
+ws.get("/best-times", view, menu("times"), (req, res) => res.json(A.bestTimes(req.ws.id, filters(req))));
+ws.get("/patterns", view, menu("patterns"), (req, res) => res.json(A.successPatterns(req.ws.id, filters(req))));
 
 // 負面留言板：level（high／mid／low）、type（comment／post／all）另外帶
 const negFilters = (req) => ({ ...filters(req), level: req.query.level, type: req.query.type });
-ws.get("/negative", view, (req, res) => res.json(negativeBoard(req.ws.id, negFilters(req))));
-ws.get("/negative.csv", view, (req, res) => {
+ws.get("/negative", view, menu("negative"), (req, res) => res.json(negativeBoard(req.ws.id, negFilters(req))));
+ws.get("/negative.csv", view, menu("negative"), block("negative.csv"), (req, res) => {
   const d = negativeBoard(req.ws.id, { ...negFilters(req), all: true });
   res.setHeader("Content-Type", "text/csv; charset=utf-8");
   res.setHeader("Content-Disposition", "attachment; filename=negative.csv");
   res.send(negativeCsv(d.items));
 });
 
-ws.get("/export.xlsx", view, async (req, res) => {
+ws.get("/export.xlsx", view, block("global.export"), async (req, res) => {
   const wb = buildWorkbook(req.ws, days(req));
   const stamp = new Date(Date.now() + 8 * 3600000).toISOString().slice(0, 10).replace(/-/g, "");
   res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
@@ -147,7 +148,7 @@ ws.get("/export.xlsx", view, async (req, res) => {
   await wb.xlsx.write(res);
   res.end();
 });
-ws.get("/export/posts.csv", view, (req, res) => {
+ws.get("/export/posts.csv", view, menu("posts"), block("posts.csv"), (req, res) => {
   res.setHeader("Content-Type", "text/csv; charset=utf-8");
   res.setHeader("Content-Disposition", "attachment; filename=posts.csv");
   res.send(postsCsv(A.postsList(req.ws.id, { ...filters(req), limit: 2000 })));
@@ -157,7 +158,7 @@ ws.get("/export/posts.csv", view, (req, res) => {
 ws.get("/topics", view, (req, res) =>
   res.json(db.prepare("SELECT * FROM topics WHERE workspace_id = ? ORDER BY id").all(req.ws.id)));
 
-ws.post("/topics", edit, (req, res) => {
+ws.post("/topics", edit, menu("manage"), block("manage.topics"), (req, res) => {
   const type = req.body?.type === "hashtag" ? "hashtag" : "keyword";
   const term = String(req.body?.term || "").trim().replace(/^#/, "");
   const maxDays = Math.min(Math.max(Number(req.body?.max_days) || 3, 1), 30);
@@ -168,7 +169,7 @@ ws.post("/topics", edit, (req, res) => {
   res.json({ ok: true });
 });
 
-ws.patch("/topics/:id", edit, (req, res) => {
+ws.patch("/topics/:id", edit, menu("manage"), block("manage.topics"), (req, res) => {
   const t = db.prepare("SELECT * FROM topics WHERE id = ? AND workspace_id = ?").get(Number(req.params.id), req.ws.id);
   if (!t) return bad(res, "找不到主題", 404);
   const enabled = req.body?.enabled != null ? (req.body.enabled ? 1 : 0) : t.enabled;
@@ -177,7 +178,7 @@ ws.patch("/topics/:id", edit, (req, res) => {
   res.json({ ok: true });
 });
 
-ws.delete("/topics/:id", edit, (req, res) => {
+ws.delete("/topics/:id", edit, menu("manage"), block("manage.topics"), (req, res) => {
   db.prepare("DELETE FROM topics WHERE id = ? AND workspace_id = ?").run(Number(req.params.id), req.ws.id);
   res.json({ ok: true });
 });
@@ -186,7 +187,7 @@ ws.get("/accounts", view, (req, res) =>
   res.json(db.prepare(`SELECT a.*, pr.name, pr.followers, pr.last_seen FROM accounts a LEFT JOIN profiles pr ON pr.handle = a.handle
       WHERE a.workspace_id = ? ORDER BY a.kind DESC, a.id`).all(req.ws.id)));
 
-ws.post("/accounts", edit, (req, res) => {
+ws.post("/accounts", edit, menu("manage"), block("manage.accounts"), (req, res) => {
   const handle = cleanHandle(req.body?.handle);
   const kind = req.body?.kind === "own" ? "own" : "competitor";
   if (!/^[A-Za-z0-9_.]{1,40}$/.test(handle)) return bad(res, "帳號格式不正確（例如 @shu.edu 或貼上個人頁網址）");
@@ -197,7 +198,7 @@ ws.post("/accounts", edit, (req, res) => {
   res.json({ ok: true });
 });
 
-ws.patch("/accounts/:id", edit, (req, res) => {
+ws.patch("/accounts/:id", edit, menu("manage"), block("manage.accounts"), (req, res) => {
   const a = db.prepare("SELECT * FROM accounts WHERE id = ? AND workspace_id = ?").get(Number(req.params.id), req.ws.id);
   if (!a) return bad(res, "找不到帳號", 404);
   const kind = ["own", "competitor"].includes(req.body?.kind) ? req.body.kind : a.kind;
@@ -207,12 +208,12 @@ ws.patch("/accounts/:id", edit, (req, res) => {
   res.json({ ok: true });
 });
 
-ws.delete("/accounts/:id", edit, (req, res) => {
+ws.delete("/accounts/:id", edit, menu("manage"), block("manage.accounts"), (req, res) => {
   db.prepare("DELETE FROM accounts WHERE id = ? AND workspace_id = ?").run(Number(req.params.id), req.ws.id);
   res.json({ ok: true });
 });
 
-ws.post("/crawl", edit, (req, res) => {
+ws.post("/crawl", edit, menu("crawl"), block("crawl.run"), (req, res) => {
   const r = startCrawl("manual", req.user.display_name || req.user.username);
   if (!r.ok) return bad(res, r.error, 409);
   res.json({ ok: true, runId: r.runId });
@@ -220,7 +221,7 @@ ws.post("/crawl", edit, (req, res) => {
 
 // 立即爬文：只抓這個工作區、近 N 小時發布、還沒抓過的貼文
 const hoursOf = (v) => Math.min(Math.max(Math.round(Number(v)) || 6, 1), 48);
-ws.post("/quick-crawl", edit, (req, res) => {
+ws.post("/quick-crawl", edit, menu("quick"), block("quick.run"), (req, res) => {
   const r = startCrawl("quick", req.user.display_name || req.user.username,
     { hours: hoursOf(req.body?.hours), wsId: req.ws.id, visit: req.body?.visit !== false });
   if (!r.ok) return bad(res, r.error, 409);
@@ -228,7 +229,7 @@ ws.post("/quick-crawl", edit, (req, res) => {
 });
 
 // 立即爬文頁：近 N 小時的貼文 ＋ 這個工作區最近一次立即爬文新收了哪些
-ws.get("/recent", view, (req, res) => {
+ws.get("/recent", view, menu("quick"), (req, res) => {
   const hours = hoursOf(req.query.hours);
   const last = db.prepare(`SELECT id, started_by, started_at, finished_at, status, window_hours, logged_out, posts_new, posts_skipped,
       posts_visited, comments_found, error, new_codes FROM runs WHERE trigger = 'quick' AND workspace_id = ? ORDER BY id DESC LIMIT 1`).get(req.ws.id);
@@ -236,48 +237,59 @@ ws.get("/recent", view, (req, res) => {
   res.json({ hours, posts: A.postsList(req.ws.id, { hours, sort: "newest", limit: 500 }), last_run: last || null });
 });
 
-ws.get("/runs", view, (req, res) =>
+ws.get("/runs", view, menu("crawl", "quick", "overview"), (req, res) =>
   res.json(db.prepare("SELECT id, trigger, started_by, started_at, finished_at, status, window_hours, logged_out, posts_found, posts_new, posts_skipped, posts_visited, profiles_seen, comments_found, comments_new, error FROM runs ORDER BY id DESC LIMIT 30").all()));
 
-ws.get("/runs/:id/log", view, (req, res) => {
+ws.get("/runs/:id/log", view, menu("crawl", "quick", "overview"), (req, res) => {
   const r = db.prepare("SELECT log FROM runs WHERE id = ?").get(Number(req.params.id));
   res.json({ log: r?.log || "" });
 });
 
 // ── 後台：成員（admin）────────────────────────────────────────────────
-ws.get("/members", admin, (req, res) =>
-  res.json(db.prepare(`SELECT u.id, u.username, u.display_name, u.is_owner, m.role FROM memberships m JOIN users u ON u.id = m.user_id
+ws.get("/members", admin, menu("members"), (req, res) =>
+  res.json(db.prepare(`SELECT u.id, u.username, u.display_name, u.is_owner, m.role, m.role_id, r.name AS role_name
+      FROM memberships m JOIN users u ON u.id = m.user_id LEFT JOIN roles r ON r.id = m.role_id
       WHERE m.workspace_id = ? ORDER BY u.id`).all(req.ws.id)));
 
-// 帳號不存在就建一個（由管理員設定初始密碼，成員登入後可自行修改）
-ws.post("/members", admin, (req, res) => {
+// 指派角色用的清單；角色的選單與區塊只有系統擁有者能在「角色權限」調整
+ws.get("/roles", admin, menu("members"), (req, res) =>
+  res.json(listRoles().map((r) => ({ id: r.id, name: r.name, level: r.level, builtin: r.builtin, menus: r.menus.length }))));
+
+// 帳號不存在就建一個（由管理員設定初始密碼，成員登入後可自行修改）；沒指定角色就用預設的「檢視者」
+// 相容舊參數 role（admin／editor／viewer）
+const roleIdFrom = (body) => Number(body?.role_id) || builtinRoleId(["admin", "editor", "viewer"].includes(body?.role) ? body.role : "viewer");
+
+ws.post("/members", admin, menu("members"), (req, res) => {
   const { username, display_name, password } = req.body || {};
-  const role = ["admin", "editor", "viewer"].includes(req.body?.role) ? req.body.role : "viewer";
+  const roleId = roleIdFrom(req.body);
+  if (!getRole(roleId)) return bad(res, "角色不存在");
   let u = db.prepare("SELECT * FROM users WHERE username = ?").get(String(username || ""));
   if (!u) {
     const err = validateCredentials(username, password);
     if (err) return bad(res, err);
     u = { id: createUser({ username, display_name, password }) };
   }
-  db.prepare("INSERT INTO memberships (user_id, workspace_id, role) VALUES (?, ?, ?) ON CONFLICT(user_id, workspace_id) DO UPDATE SET role = excluded.role")
-    .run(u.id, req.ws.id, role);
+  const r = assignRole(u.id, req.ws.id, roleId);
+  if (r.error) return bad(res, r.error);
   res.json({ ok: true });
 });
 
-ws.patch("/members/:uid", admin, (req, res) => {
-  const role = req.body?.role;
-  if (!["admin", "editor", "viewer"].includes(role)) return bad(res, "角色不正確");
-  db.prepare("UPDATE memberships SET role = ? WHERE user_id = ? AND workspace_id = ?").run(role, Number(req.params.uid), req.ws.id);
+ws.patch("/members/:uid", admin, menu("members"), (req, res) => {
+  const uid = Number(req.params.uid);
+  if (!db.prepare("SELECT 1 FROM memberships WHERE user_id = ? AND workspace_id = ?").get(uid, req.ws.id)) return bad(res, "找不到這位成員", 404);
+  if (uid === req.user.id && !req.user.is_owner) return bad(res, "不能修改自己的角色");
+  const r = assignRole(uid, req.ws.id, roleIdFrom(req.body));
+  if (r.error) return bad(res, r.error);
   res.json({ ok: true });
 });
 
-ws.delete("/members/:uid", admin, (req, res) => {
+ws.delete("/members/:uid", admin, menu("members"), (req, res) => {
   if (Number(req.params.uid) === req.user.id) return bad(res, "不能把自己移出工作區");
   db.prepare("DELETE FROM memberships WHERE user_id = ? AND workspace_id = ?").run(Number(req.params.uid), req.ws.id);
   res.json({ ok: true });
 });
 
-ws.patch("/", admin, (req, res) => {
+ws.patch("/", admin, menu("members"), (req, res) => {
   const name = String(req.body?.name || "").trim();
   if (!name) return bad(res, "請輸入工作區名稱");
   db.prepare("UPDATE workspaces SET name = ? WHERE id = ?").run(name, req.ws.id);
@@ -323,9 +335,28 @@ sys.delete("/workspaces/:id", (req, res) => {
   res.json({ ok: true });
 });
 
+// 角色權限：每個角色能看的選單、隱藏的區塊、操作層級
+sys.get("/roles", (req, res) => res.json({ roles: listRoles(), registry: registry() }));
+sys.post("/roles", (req, res) => {
+  const r = saveRole(null, req.body);
+  if (r.error) return bad(res, r.error);
+  res.json({ ok: true, id: r.id });
+});
+sys.put("/roles/:id", (req, res) => {
+  const r = saveRole(Number(req.params.id), req.body);
+  if (r.error) return bad(res, r.error);
+  res.json({ ok: true, id: r.id });
+});
+sys.delete("/roles/:id", (req, res) => {
+  const r = deleteRole(Number(req.params.id));
+  if (r.error) return bad(res, r.error);
+  res.json({ ok: true });
+});
+
 sys.get("/users", (req, res) =>
   res.json(db.prepare(`SELECT u.id, u.username, u.display_name, u.is_owner, u.created_at,
-      (SELECT group_concat(w.name || '（' || m.role || '）', '、') FROM memberships m JOIN workspaces w ON w.id = m.workspace_id WHERE m.user_id = u.id) AS workspaces
+      (SELECT group_concat(w.name || '（' || COALESCE(r.name, m.role) || '）', '、') FROM memberships m JOIN workspaces w ON w.id = m.workspace_id
+         LEFT JOIN roles r ON r.id = m.role_id WHERE m.user_id = u.id) AS workspaces
       FROM users u ORDER BY u.id`).all()));
 sys.post("/users/:id/password", (req, res) => {
   if (String(req.body?.password || "").length < 8) return bad(res, "密碼至少 8 個字元");

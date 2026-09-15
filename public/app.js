@@ -175,31 +175,58 @@ const ROUTES = {
   quick: { title: "立即爬文", group: "管理", render: viewQuick },
   crawl: { title: "抓取與排程", group: "管理", render: viewCrawl },
   members: { title: "成員", group: "管理", render: viewMembers, min: "admin" },
+  roles: { title: "角色權限", group: "管理", render: viewRoles, owner: true },
   system: { title: "系統設定", group: "管理", render: viewSystem, owner: true },
   post: { title: "貼文詳情", hidden: true, render: viewPost },
   me: { title: "我的帳號", hidden: true, render: viewMe },
 };
 
+// 角色權限：選單看允許清單、區塊看隱藏清單；系統擁有者看得到全部
+const canMenu = (key) => !!S.ws && (S.ws.owner || (S.ws.menus || []).includes(key));
+const blockHidden = (key) => !!S.ws && !S.ws.owner && (S.ws.hidden_blocks || []).includes(key);
+const routeAllowed = (key, r) => !r.hidden && !(r.min && !can(r.min)) && (r.owner ? !!S.me?.user.is_owner : canMenu(key));
+
 function renderNav(active) {
   let html = "";
   let group = "";
   for (const [key, r] of Object.entries(ROUTES)) {
-    if (r.hidden || (r.min && !can(r.min)) || (r.owner && !S.me.user.is_owner)) continue;
+    if (!routeAllowed(key, r)) continue;
     if (r.group !== group) { group = r.group; html += `<div class="nav-group">${group === "分析" ? "前台・分析" : "後台・管理"}</div>`; }
     html += `<a href="#/${key}" class="${key === active ? "active" : ""}">${r.title}</a>`;
   }
   $("#nav").innerHTML = html;
 }
 
+// 被角色隱藏的區塊直接移除。各頁排序、切換時會自己重畫，所以用 MutationObserver 每次都再套一次
+function applyBlocks(root) {
+  if (!S.ws || S.ws.owner) return;
+  for (const el of root.querySelectorAll("[data-block]")) if (blockHidden(el.dataset.block)) el.remove();
+  for (const g of root.querySelectorAll(".grid2")) if (!g.children.length) g.remove();
+}
+new MutationObserver(() => applyBlocks($("#view"))).observe($("#view"), { childList: true, subtree: true });
+
 async function route() {
   if (!S.me) return;
-  const [, name = "overview", param] = location.hash.match(/^#\/?([^/?]*)\/?([^?]*)/) || [];
-  const r = ROUTES[name] || ROUTES.overview;
+  const [, asked = "overview", param] = location.hash.match(/^#\/?([^/?]*)\/?([^?]*)/) || [];
+  let name = ROUTES[asked] ? asked : "overview";
+  // 沒有權限的頁面改開第一個看得到的選單（貼文詳情、我的帳號不受選單限制）
+  if (!ROUTES[name].hidden && !routeAllowed(name, ROUTES[name])) {
+    const first = Object.entries(ROUTES).find(([k, x]) => routeAllowed(k, x));
+    if (!first) {
+      renderNav("");
+      $("#pageTitle").textContent = "沒有可用的頁面";
+      $("#view").innerHTML = empty("你的角色目前沒有任何可看的頁面，請聯絡管理員調整角色權限。");
+      return;
+    }
+    name = first[0];
+  }
+  const r = ROUTES[name];
   destroyCharts();
   clearTimers();
   renderNav(name);
   $("#pageTitle").textContent = r.title;
   $("#exportBtn").href = `/api/ws/export.xlsx?ws=${S.ws.id}&days=${S.days}`;
+  $("#exportBtn").hidden = blockHidden("global.export");
   const view = $("#view");
   view.style.opacity = "0.55";
   try {
@@ -221,7 +248,7 @@ async function viewOverview(el) {
   const flagged = k.flagged_posts + k.flagged_comments;
   el.innerHTML = `
     ${!k.posts ? `<div class="note">這個期間還沒有資料。先到「<a href="#/manage">監測設定</a>」新增主題或帳號，再到「<a href="#/crawl">抓取與排程</a>」按「立即抓取」。</div>` : ""}
-    <div class="tiles">
+    <div class="tiles" data-block="overview.kpi">
       ${tile("貼文數", fmt(k.posts), `近 ${S.days} 天`)}
       ${tile("總互動", short(k.interactions), "讚＋留言＋轉發＋分享")}
       ${tile("平均互動／篇", fmt(k.avg_inter), `中位數 ${fmt(k.median_inter)}`)}
@@ -230,24 +257,24 @@ async function viewOverview(el) {
       ${tile("負面標記", `${flagged ? "⚠ " : ""}${fmt(flagged)}`, `貼文 ${k.flagged_posts}・留言 ${k.flagged_comments}`, flagged ? "warn" : "")}
     </div>
     <div class="grid2">
-      <section class="card"><h2>每日新貼文</h2><p class="sub">依發布日（台灣時間）統計</p><div class="chart h240"><canvas id="c-posts"></canvas></div></section>
-      <section class="card"><h2>每日留言情緒</h2><p class="sub">字典式判斷，可在「系統設定」調整字典</p><div class="chart h240"><canvas id="c-sent"></canvas></div></section>
+      <section class="card" data-block="overview.charts"><h2>每日新貼文</h2><p class="sub">依發布日（台灣時間）統計</p><div class="chart h240"><canvas id="c-posts"></canvas></div></section>
+      <section class="card" data-block="overview.charts"><h2>每日留言情緒</h2><p class="sub">字典式判斷，可在「系統設定」調整字典</p><div class="chart h240"><canvas id="c-sent"></canvas></div></section>
     </div>
     <div class="grid2">
-      <section class="card"><h2>互動最高的貼文</h2>
+      <section class="card" data-block="overview.top_posts"><h2>互動最高的貼文</h2>
         ${d.top_posts.length ? `<ul class="list">${d.top_posts.map((p) => `<li><a href="#/post/${p.code}">${esc(snippet(p.content, 60))}</a>
           <div class="meta"><span>@${esc(p.author)}</span><span>${twTime(p.posted_at)}</span><span>互動 ${fmt(p.inter)}</span>${p.views != null ? `<span>瀏覽 ${short(p.views)}</span>` : ""}${flags(p.neg_hits)}</div></li>`).join("")}</ul>` : empty("尚無資料")}
       </section>
-      <section class="card"><h2>需要注意的留言</h2><p class="sub">含負面關鍵字或判斷為負面，依按讚數排序・<a href="#/negative">看全部可能負面的留言 →</a></p>
+      <section class="card" data-block="overview.flagged"><h2>需要注意的留言</h2><p class="sub">含負面關鍵字或判斷為負面，依按讚數排序・<a href="#/negative">看全部可能負面的留言 →</a></p>
         ${d.flagged.length ? `<ul class="list">${d.flagged.map((c) => `<li>${esc(snippet(c.content, 80))}
           <div class="meta"><span>@${esc(c.author)}</span><span>讚 ${fmt(c.likes)}</span>${sentBadge(c.sentiment)}${flags(c.neg_hits)}<a href="https://www.threads.com/@${esc(c.post_author)}/post/${esc(c.post_code)}" target="_blank" rel="noopener">看原文 ↗</a></div></li>`).join("")}</ul>` : empty("沒有需要注意的留言")}
       </section>
     </div>
     <div class="grid2">
-      <section class="card"><h2>負面關鍵字出現次數</h2><p class="sub">貼文＋留言</p>
+      <section class="card" data-block="overview.neg_keywords"><h2>負面關鍵字出現次數</h2><p class="sub">貼文＋留言</p>
         ${d.neg_keywords.length ? `<div class="barlist">${d.neg_keywords.slice(0, 12).map((x) => `<div class="row"><span>${esc(x.keyword)}</span><div class="bar" style="width:${(x.count / d.neg_keywords[0].count) * 100}%"></div><span class="num">${x.count}</span></div>`).join("")}</div>` : empty("期間內沒有出現負面關鍵字")}
       </section>
-      <section class="card"><h2>最近一次抓取</h2>${runSummary(d.last_run)}</section>
+      <section class="card" data-block="overview.last_run"><h2>最近一次抓取</h2>${runSummary(d.last_run)}</section>
     </div>`;
 
   const labels = d.daily.map((x) => shortDate(x.date));
@@ -315,20 +342,20 @@ async function viewNegative(el) {
       ${seg("type", [["comment", "留言"], ["post", "貼文"], ["all", "全部"]])}
       <select id="negSort" aria-label="排序"><option value="severity">嚴重度優先</option><option value="likes">按讚最多</option><option value="newest">最新</option></select>
       <input type="search" id="negQ" placeholder="搜尋內容或訊號" value="${esc(st.q)}">
-      <a class="btn sm" href="/api/ws/negative.csv?ws=${S.ws.id}&${qs}">下載 CSV</a>
+      <a class="btn sm" data-block="negative.csv" href="/api/ws/negative.csv?ws=${S.ws.id}&${qs}">下載 CSV</a>
     </div>
     <div class="note">把可能是負面的內容盡量找出來，寧可多抓：輿情關鍵字、強烈負評與粗話、抱怨詞、質問句、勸退、反諷語氣與負面表情都算訊號，依強弱分三級。
       <strong>高度</strong>＝含輿情關鍵字或多個強烈訊號；<strong>中度</strong>＝明確負評；<strong>低度</strong>＝可能負面，建議人工確認。系統設定的「負面輿情關鍵字」「負面詞」也會一併比對。</div>
-    <div class="tiles">
+    <div class="tiles" data-block="negative.kpi">
       ${tile(`可能負面${noun}`, fmt(c.total) + " 則", `涉及 ${fmt(c.posts)} 篇貼文`)}
       ${tile("⚠ 高度", fmt(c.high), "輿情關鍵字或強烈負評", c.high ? "warn" : "")}
       ${tile("▲ 中度", fmt(c.mid), "明確負評")}
       ${tile("● 低度", fmt(c.low), "可能負面，需人工確認")}
     </div>
-    <section class="card"><h2>最常出現的負面訊號</h2><p class="sub">點一下只看含這個訊號的內容</p>
+    <section class="card" data-block="negative.signals"><h2>最常出現的負面訊號</h2><p class="sub">點一下只看含這個訊號的內容</p>
       ${d.topSignals.length ? `<div class="hits">${d.topSignals.map((s) => `<button class="hit" data-q="${esc(s.term)}"><b>${esc(clip(s.term, 14))}</b> ${esc(s.cat)}・${s.count}</button>`).join("")}</div>` : empty("期間內沒有偵測到負面訊號")}
     </section>
-    <section class="card"><h2>負面${noun}（${fmt(d.matched)} 則${d.matched > d.shown ? `，顯示前 ${fmt(d.shown)} 則，完整內容請下載 CSV` : ""}）</h2>
+    <section class="card" data-block="negative.list"><h2>負面${noun}（${fmt(d.matched)} 則${d.matched > d.shown ? `，顯示前 ${fmt(d.shown)} 則，完整內容請下載 CSV` : ""}）</h2>
       <div class="filters">${seg("level", [["", `全部 ${c.total}`], ["high", `⚠ 高度 ${c.high}`], ["mid", `▲ 中度 ${c.mid}`], ["low", `● 低度 ${c.low}`]])}
         ${st.q ? `<span class="small">只看含「${esc(clip(st.q, 16))}」 <button class="link" id="negClear">清除</button></span>` : ""}</div>
       ${d.items.length ? `<ul class="board">${d.items.map(negItem).join("")}</ul>` : empty("沒有符合條件的內容")}
@@ -365,14 +392,14 @@ async function viewTopics(el, param) {
     const s = daily.series.find((x) => x.id === sel.id);
     const color = topicColor(sel.id);
     el.innerHTML = `${guestNote}
-      <section class="card"><h2>主題熱度排名</h2><p class="sub">點欄位標題可切換排名依據。「平均」與「中位數」一起看，避免被少數爆文誤導；趨勢比較期間前半與後半。</p>
+      <section class="card" data-block="topics.ranking"><h2>主題熱度排名</h2><p class="sub">點欄位標題可切換排名依據。「平均」與「中位數」一起看，避免被少數爆文誤導；趨勢比較期間前半與後半。</p>
         ${sortableTable("t-topics", cols, sum, { defaultSort: { key: "interactions", dir: -1 }, onRow: true })}</section>
-      <section class="card"><h2>${sel.type === "hashtag" ? "#" : ""}${esc(sel.term)}：熱度趨勢</h2><p class="sub">提及數與互動數分開畫，各自一個刻度</p>
+      <section class="card" data-block="topics.trend"><h2>${sel.type === "hashtag" ? "#" : ""}${esc(sel.term)}：熱度趨勢</h2><p class="sub">提及數與互動數分開畫，各自一個刻度</p>
         <div class="grid2">
           <div><h3>每日提及數</h3><div class="chart h200"><canvas id="c-m"></canvas></div></div>
           <div><h3>每日互動數</h3><div class="chart h200"><canvas id="c-i"></canvas></div></div>
         </div></section>
-      <section class="card"><h2>${sel.type === "hashtag" ? "#" : ""}${esc(sel.term)}：熱門貼文</h2><p class="sub">依總互動排序，適合研究爆文結構</p><div id="hot">載入中…</div></section>`;
+      <section class="card" data-block="topics.hot"><h2>${sel.type === "hashtag" ? "#" : ""}${esc(sel.term)}：熱門貼文</h2><p class="sub">依總互動排序，適合研究爆文結構</p><div id="hot">載入中…</div></section>`;
     bindTable("t-topics", sum, draw, (r) => (location.hash = `#/topics/${r.id}`));
     const labels = daily.dates.map(shortDate);
     mkChart("c-m", { type: "bar", data: { labels, datasets: [barDs("提及數", s?.mentions || [], color)] }, options: chartOpts() });
@@ -398,11 +425,11 @@ async function viewCompare(el) {
       <div class="chips">${sum.map((t) => `<span class="chip ${S.compareSel.has(t.id) ? "" : "off"}" data-id="${t.id}" role="button" tabindex="0"><span class="dot" style="background:${topicColor(t.id)}"></span>${t.type === "hashtag" ? "#" : ""}${esc(t.term)}</span>`).join("")}</div>
       <p class="sub">最多同時比較 8 個主題。點選主題可加入或移除。</p>
       <div class="grid2">
-        <section class="card"><h2>每日提及數</h2><div class="chart h280"><canvas id="c-cm"></canvas></div></section>
-        <section class="card"><h2>每日互動數</h2><div class="chart h280"><canvas id="c-ci"></canvas></div></section>
+        <section class="card" data-block="compare.daily"><h2>每日提及數</h2><div class="chart h280"><canvas id="c-cm"></canvas></div></section>
+        <section class="card" data-block="compare.daily"><h2>每日互動數</h2><div class="chart h280"><canvas id="c-ci"></canvas></div></section>
       </div>
-      <section class="card"><h2>互動分布</h2><p class="sub">各主題的貼文落在哪個互動級距；爆文集中還是普遍都有人互動，一眼看出</p><div class="chart h280"><canvas id="c-dist"></canvas></div></section>
-      <section class="card"><h2>數字對照</h2>
+      <section class="card" data-block="compare.dist"><h2>互動分布</h2><p class="sub">各主題的貼文落在哪個互動級距；爆文集中還是普遍都有人互動，一眼看出</p><div class="chart h280"><canvas id="c-dist"></canvas></div></section>
+      <section class="card" data-block="compare.table"><h2>數字對照</h2>
         ${sortableTable("t-cmp", [
           { label: "主題", render: (r) => `<span class="sent" style="--sent-neu:${topicColor(r.id)}"></span>${r.type === "hashtag" ? "#" : ""}${esc(r.term)}` },
           { label: "提及數", sort: "mentions", num: true, render: (r) => fmt(r.mentions) },
@@ -469,12 +496,12 @@ async function viewPosts(el) {
     el.innerHTML = `
       <div class="filters">${sourceSelect()}
         <input type="search" id="postQ" placeholder="搜尋內文" value="${esc(q)}">
-        <a class="btn sm" href="/api/ws/export/posts.csv?ws=${S.ws.id}&days=${S.days}${sourceQuery()}">下載 CSV</a>
+        <a class="btn sm" data-block="posts.csv" href="/api/ws/export/posts.csv?ws=${S.ws.id}&days=${S.days}${sourceQuery()}">下載 CSV</a>
       </div>
-      ${picked.length >= 2 ? `<section class="card"><h2>貼文互動比較（${picked.length} 篇）</h2><p class="sub">同一個刻度比較讚、留言、轉發、分享</p>
+      ${picked.length >= 2 ? `<section class="card" data-block="posts.compare"><h2>貼文互動比較（${picked.length} 篇）</h2><p class="sub">同一個刻度比較讚、留言、轉發、分享</p>
         <div class="chart h280"><canvas id="c-pc"></canvas></div>
-        <p style="margin-top:8px"><button class="btn sm" id="clearSel">清除選取</button></p></section>` : `<div class="note">勾選 2–5 篇貼文的「比較」，會在這裡並排比較互動表現。</div>`}
-      <section class="card"><h2>全部串文成效</h2><p class="sub">共 ${fmt(posts.length)} 篇。點欄位標題排序，點列開啟詳情。「較上次」是跟前一次抓取相比的互動增加量；互動率＝互動÷作者粉絲數（僅監測帳號有）。</p>
+        <p style="margin-top:8px"><button class="btn sm" id="clearSel">清除選取</button></p></section>` : `<div class="note" data-block="posts.compare">勾選 2–5 篇貼文的「比較」，會在這裡並排比較互動表現。</div>`}
+      <section class="card" data-block="posts.list"><h2>全部串文成效</h2><p class="sub">共 ${fmt(posts.length)} 篇。點欄位標題排序，點列開啟詳情。「較上次」是跟前一次抓取相比的互動增加量；互動率＝互動÷作者粉絲數（僅監測帳號有）。</p>
         ${posts.length ? postTable("t-posts", posts, { select: true }) : empty("沒有符合條件的貼文")}</section>`;
     bindSource(() => route());
     $("#postQ").addEventListener("change", (e) => { S.postQ = e.target.value.trim(); route(); });
@@ -553,15 +580,15 @@ async function viewViews(el) {
     el.innerHTML = `
       <div class="filters">${sourceSelect()}</div>
       <div class="note">瀏覽數是 Threads 貼文頁公開顯示的數字，系統逐篇點進貼文時才取得（每次抓取有上限，可在系統設定調整）。判斷基準：以期間內的中位數為準——瀏覽不到中位數一半算「曝光偏低」；瀏覽夠但每千次瀏覽的互動不到中位數一半算「高曝光低互動」。</div>
-      <div class="tiles">
+      <div class="tiles" data-block="views.kpi">
         ${tile("有瀏覽資料", fmt(d.posts.length) + " 篇")}
         ${tile("瀏覽中位數", short(d.median_views))}
         ${tile("互動／千次瀏覽（中位）", fmt(d.median_per_k))}
         ${classes.map((c) => tile(c, fmt(count(c)) + " 篇")).join("")}
       </div>
-      <section class="card"><h2>瀏覽 × 互動</h2><p class="sub">橫軸瀏覽（對數刻度），縱軸總互動；右下角＝看的人多但不太互動</p>
+      <section class="card" data-block="views.scatter"><h2>瀏覽 × 互動</h2><p class="sub">橫軸瀏覽（對數刻度），縱軸總互動；右下角＝看的人多但不太互動</p>
         ${d.posts.length ? `<div class="chart h320"><canvas id="c-sc"></canvas></div>` : empty("還沒有瀏覽資料")}</section>
-      <section class="card"><h2>各貼文曝光判斷</h2>
+      <section class="card" data-block="views.table"><h2>各貼文曝光判斷</h2>
         ${sortableTable("t-views", [
           { label: "發布時間", sort: "posted_at", render: (p) => `<span class="nowrap">${twTime(p.posted_at)}</span>` },
           { label: "作者", render: (p) => `@${esc(p.author)}` },
@@ -597,7 +624,7 @@ async function viewAccounts(el) {
     destroyCharts();
     const opts = (v) => sum.map((a) => `<option value="${esc(a.handle)}" ${a.handle === v ? "selected" : ""}>@${esc(a.handle)}${a.kind === "own" ? "（自己）" : ""}</option>`).join("");
     el.innerHTML = `${guestNote}
-      <section class="card"><h2>帳號總覽</h2><p class="sub">互動率＝平均互動 ÷ 粉絲數。粉絲成長從系統開始記錄的那天算起。</p>
+      <section class="card" data-block="accounts.summary"><h2>帳號總覽</h2><p class="sub">互動率＝平均互動 ÷ 粉絲數。粉絲成長從系統開始記錄的那天算起。</p>
         ${sortableTable("t-acc", [
           { label: "帳號", render: (a) => `<span class="sent" style="--sent-neu:${accountColor(a.handle)}"></span>${authorLink(a.handle)} ${a.kind === "own" ? '<span class="badge own">自己</span>' : '<span class="badge">競品</span>'}<div class="muted small">${esc(a.label || a.name || "")}</div>` },
           { label: "粉絲", sort: "followers", num: true, render: (a) => short(a.followers) },
@@ -612,9 +639,9 @@ async function viewAccounts(el) {
           { label: "平均瀏覽", sort: "views_avg", num: true, render: (a) => short(a.views_avg) },
           { label: "最佳貼文", cls: "content-cell", render: (a) => (a.best ? `<a href="#/post/${a.best.code}">${esc(snippet(a.best.content, 26))}</a> <span class="muted small">互動 ${fmt(a.best.inter)}</span>` : "—") },
         ], sum, { defaultSort: { key: "followers", dir: -1 } })}</section>
-      <section class="card"><h2>粉絲成長速度</h2><p class="sub">各帳號粉絲數量級不同，改畫「相對第一筆紀錄的成長 %」，同一個刻度才能比較動能</p>
+      <section class="card" data-block="accounts.growth"><h2>粉絲成長速度</h2><p class="sub">各帳號粉絲數量級不同，改畫「相對第一筆紀錄的成長 %」，同一個刻度才能比較動能</p>
         <div class="chart h280"><canvas id="c-fol"></canvas></div></section>
-      <section class="card"><h2>一對一比較</h2>
+      <section class="card" data-block="accounts.compare"><h2>一對一比較</h2>
         <div class="filters"><select id="cmpA">${opts(S.cmpA)}</select><span class="muted">vs</span><select id="cmpB">${opts(S.cmpB)}</select></div>
         <div id="cmpBody">載入中…</div></section>`;
     bindTable("t-acc", sum, draw);
@@ -666,13 +693,13 @@ async function viewTimes(el) {
   const order = [1, 2, 3, 4, 5, 6, 0];
   el.innerHTML = `
     <div class="filters">${sourceSelect()}<span class="muted small">期間至少取近 30 天，樣本才夠</span></div>
-    <section class="card"><h2>星期 × 時段的平均互動</h2><p class="sub">共 ${fmt(d.posts)} 篇貼文，依發布時間（台灣）分格；格內上方為平均互動、下方為篇數。顏色越深表示平均互動越高。</p>
+    <section class="card" data-block="times.heatmap"><h2>星期 × 時段的平均互動</h2><p class="sub">共 ${fmt(d.posts)} 篇貼文，依發布時間（台灣）分格；格內上方為平均互動、下方為篇數。顏色越深表示平均互動越高。</p>
       ${d.posts ? `<div class="table-wrap"><table class="heat"><thead><tr><th></th>${BLOCKS.map((b) => `<th>${b}</th>`).join("")}</tr></thead><tbody>
         ${order.map((day) => `<tr><th>週${WEEK[day]}</th>${BLOCKS.map((_, bi) => { const c = d.cells.find((x) => x.day === day && x.block === bi); return `<td style="${shade(c.avg)}" title="週${WEEK[day]} ${BLOCKS[bi]}：${c.n ? `平均互動 ${fmt(c.avg)}，${c.n} 篇` : "沒有貼文"}">${c.n ? `${short(c.avg)}<small>${c.n} 篇</small>` : ""}</td>`; }).join("")}</tr>`).join("")}
       </tbody></table></div>
       <div class="heat-legend">低 ${steps.map((s) => `<i style="background:${css(s)}"></i>`).join("")} 高</div>` : empty("這個來源還沒有貼文")}
     </section>
-    <section class="card"><h2>建議發文時段</h2><p class="sub">只列出至少有 2 篇貼文的時段，依互動中位數排序（避免單篇爆文把整格拉高）</p>
+    <section class="card" data-block="times.recommend"><h2>建議發文時段</h2><p class="sub">只列出至少有 2 篇貼文的時段，依互動中位數排序（避免單篇爆文把整格拉高）</p>
       ${d.recommend.length ? `<ol>${d.recommend.map((c) => `<li><strong>週${WEEK[c.day]} ${BLOCKS[c.block]}</strong>：互動中位數 ${fmt(c.median)}、平均 ${fmt(c.avg)}（${c.n} 篇）</li>`).join("")}</ol>` : empty("樣本還不夠。每天持續抓取、或加入自己的帳號後會越來越準。")}
     </section>`;
   bindSource(() => route());
@@ -684,20 +711,20 @@ async function viewPatterns(el) {
   el.innerHTML = `<div class="filters">${sourceSelect()}<span class="muted small">期間至少取近 30 天</span></div>` + (!d.enough
     ? empty(`這個來源目前只有 ${d.posts} 篇有內文的貼文，至少需要 ${d.min} 篇才能分析。持續抓取幾天後再來看。`)
     : `
-    <section class="card"><h2>高成效貼文的共同點</h2><p class="sub">把 ${d.posts} 篇貼文依總互動排序，前 25%（${d.top_n} 篇、互動 ${fmt(d.threshold)} 以上）當「高成效」，跟其他貼文比較內容特徵</p>
+    <section class="card" data-block="patterns.insights"><h2>高成效貼文的共同點</h2><p class="sub">把 ${d.posts} 篇貼文依總互動排序，前 25%（${d.top_n} 篇、互動 ${fmt(d.threshold)} 以上）當「高成效」，跟其他貼文比較內容特徵</p>
       ${d.insights.length ? `<ul>${d.insights.map((x) => `<li>${esc(x)}</li>`).join("")}</ul>` : `<p class="muted">高成效與其他貼文在各項特徵上差距不大（都在 15 個百分點內）。</p>`}
     </section>
     <div class="grid2">
-      <section class="card"><h2>特徵比較</h2>
+      <section class="card" data-block="patterns.features"><h2>特徵比較</h2>
         <div class="table-wrap"><table class="data"><thead><tr><th>特徵</th><th class="num">高成效</th><th class="num">其他</th><th class="num">差距</th></tr></thead>
         <tbody>${d.rows.map((r) => `<tr><td>${esc(r.label)}</td><td class="num">${r.top}%</td><td class="num">${r.rest}%</td><td class="num">${r.diff > 0 ? "+" : ""}${r.diff}</td></tr>`).join("")}
         <tr><td>平均字數</td><td class="num">${d.avg_len.top}</td><td class="num">${d.avg_len.rest}</td><td class="num">${d.avg_len.top - d.avg_len.rest > 0 ? "+" : ""}${d.avg_len.top - d.avg_len.rest}</td></tr></tbody></table></div>
       </section>
-      <section class="card"><h2>高成效貼文常見詞</h2><p class="sub">在高成效貼文出現比例明顯高於其他貼文的雙字詞，可當題材靈感</p>
+      <section class="card" data-block="patterns.features"><h2>高成效貼文常見詞</h2><p class="sub">在高成效貼文出現比例明顯高於其他貼文的雙字詞，可當題材靈感</p>
         ${d.terms.length ? d.terms.map((t) => `<span class="term" title="高成效 ${t.top_share}%／其他 ${t.rest_share}%">${esc(t.term)} <span class="muted small">${t.top_share}% vs ${t.rest_share}%</span></span>`).join("") : empty("沒有明顯的共同詞")}
       </section>
     </div>
-    <section class="card"><h2>高成效範例</h2>
+    <section class="card" data-block="patterns.examples"><h2>高成效範例</h2>
       <ul class="list">${d.examples.map((p) => `<li><a href="#/post/${p.code}">${esc(p.content)}</a><div class="meta"><span>@${esc(p.author)}</span><span>互動 ${fmt(p.inter)}</span></div></li>`).join("")}</ul>
     </section>`);
   bindSource(() => route());
@@ -710,7 +737,7 @@ async function viewManage(el) {
   const dis = ed ? "" : "disabled";
   el.innerHTML = `
     ${ed ? "" : `<div class="note">你是「檢視者」，只能查看設定。</div>`}
-    <section class="card"><h2>主題監測</h2><p class="sub">關鍵字：內文或主題含這個字的貼文；主題標籤：Threads 標籤搜尋的結果。「天數」是只收近幾天發布的貼文。</p>
+    <section class="card" data-block="manage.topics"><h2>主題監測</h2><p class="sub">關鍵字：內文或主題含這個字的貼文；主題標籤：Threads 標籤搜尋的結果。「天數」是只收近幾天發布的貼文。</p>
       <form class="form-row" id="topicForm">
         <label class="field">類型<select name="type" ${dis}><option value="keyword">關鍵字</option><option value="hashtag">主題標籤</option></select></label>
         <label class="field">關鍵字／標籤<input name="term" type="text" placeholder="例：世新、#世新大學" required ${dis}></label>
@@ -724,7 +751,7 @@ async function viewManage(el) {
           <td><button class="btn sm danger" data-topic-del="${t.id}" ${dis}>刪除</button></td></tr>`).join("")}
       </tbody></table></div>` : empty("還沒有主題")}
     </section>
-    <section class="card"><h2>帳號監測</h2><p class="sub">加入自己的帳號與競品帳號，系統每天記錄粉絲數與貼文表現。可以輸入 @帳號 或貼上個人頁網址。</p>
+    <section class="card" data-block="manage.accounts"><h2>帳號監測</h2><p class="sub">加入自己的帳號與競品帳號，系統每天記錄粉絲數與貼文表現。可以輸入 @帳號 或貼上個人頁網址。</p>
       <form class="form-row" id="accForm">
         <label class="field">帳號<input name="handle" type="text" placeholder="@example" required ${dis}></label>
         <label class="field">顯示名稱（選填）<input name="label" type="text" ${dis}></label>
@@ -769,7 +796,7 @@ function latestPostsCard(id, posts, isNew, note = "") {
     { label: "瀏覽", sort: "views", num: true, render: (p) => short(p.views) },
     { label: "", render: (p) => `<a href="${esc(p.url)}" target="_blank" rel="noopener" class="small nowrap">Threads ↗</a>` },
   ];
-  return `<section class="card"><h2>最新 10 篇貼文</h2>
+  return `<section class="card" data-block="${id === "t-latest" ? "crawl.latest" : "quick.latest"}"><h2>最新 10 篇貼文</h2>
     <p class="sub">這個工作區已抓到的貼文，依發布時間由新到舊${note}。點列開啟詳情，點欄位標題排序。</p>
     ${posts.length ? sortableTable(id, cols, posts, { onRow: true }) : empty("還沒有抓到任何貼文")}</section>`;
 }
@@ -792,7 +819,7 @@ async function viewQuick(el) {
   const lastLine = last ? `上次立即爬文：${twFull(last.started_at)}（近 ${last.window_hours} 小時・${esc(last.started_by || "")}）— ${RUN_ST[last.status] || esc(last.status)}，新收 ${fmt(last.posts_new)} 篇、已抓過略過 ${fmt(last.posts_skipped)} 篇${last.posts_visited ? `、點進 ${fmt(last.posts_visited)} 篇` : ""}${last.logged_out ? "・遇到登入牆" : ""}` : "";
   const draw = () => {
     el.innerHTML = `
-      <section class="card"><h2>立即爬文</h2>
+      <section class="card" data-block="quick.run"><h2>立即爬文</h2>
         <p class="sub">馬上抓一次這個工作區的主題與帳號，<strong>只收近 ${h} 小時內發布、資料庫裡還沒有的貼文</strong>。抓過的一律略過：不重複收錄、不重新點進去。通常 1–5 分鐘。</p>
         ${nothing ? `<div class="note">這個工作區還沒有啟用中的主題或帳號，先到「<a href="#/manage">監測設定</a>」新增。</div>`
           : `<p class="small muted">範圍：主題 ${topics.map((t) => esc((t.type === "hashtag" ? "#" : "") + t.term)).join("、") || "無"}・帳號 ${accounts.map((a) => "@" + esc(a.handle)).join("、") || "無"}</p>`}
@@ -839,7 +866,7 @@ async function viewCrawl(el) {
   const lastStart = runs[0]?.started_at;
   const dur = (r) => (r.finished_at ? `${Math.max(1, Math.round((Date.parse(r.finished_at) - Date.parse(r.started_at)) / 60000))} 分` : "—");
   el.innerHTML = `
-    <section class="card"><h2>立即抓取</h2>
+    <section class="card" data-block="crawl.run"><h2>立即抓取</h2>
       <p class="sub">會開一個 Chrome 視窗自動搜尋與捲動，所有工作區的主題與帳號一起抓。依主題與帳號數量，通常 3–15 分鐘。只想補最新幾小時的貼文，用「<a href="#/quick">立即爬文</a>」比較快。</p>
       <p><span class="status-dot ${st.running ? "run" : ""}"></span>${st.running ? `抓取中（run #${st.runId}，${twTime(st.startedAt)} 開始）` : "目前閒置"}
         ${st.next ? `<span class="muted small">・下一次排程：${twFull(st.next)}</span>` : `<span class="muted small">・排程未啟用</span>`}</p>
@@ -848,7 +875,7 @@ async function viewCrawl(el) {
       <h3>即時紀錄</h3><pre class="log" id="liveLog">${esc(st.log.join("\n") || "（尚無）")}</pre>
     </section>
     ${latestPostsCard("t-latest", latest, (p) => !!lastStart && p.first_seen >= lastStart, lastStart ? "；標「新」的是最近一次抓取新收的" : "")}
-    <section class="card"><h2>抓取紀錄</h2>
+    <section class="card" data-block="crawl.runs"><h2>抓取紀錄</h2>
       ${runs.length ? `<div class="table-wrap"><table class="data"><thead><tr><th>#</th><th>開始</th><th>觸發</th><th>耗時</th><th>狀態</th><th class="num">主題收錄</th><th class="num">新貼文</th><th class="num">略過重複</th><th class="num">帳號</th><th class="num">點進</th><th class="num">留言</th><th></th></tr></thead><tbody>
         ${runs.map((r) => `<tr><td class="num">${r.id}</td><td class="nowrap">${twTime(r.started_at)}</td><td>${esc(triggerName(r))}</td><td>${dur(r)}</td>
           <td>${RUN_ST[r.status] || r.status}${r.logged_out ? ' <span class="badge">登入牆</span>' : ""}${r.error ? `<div class="flag">${esc(r.error)}</div>` : ""}</td>
@@ -879,30 +906,121 @@ async function viewCrawl(el) {
 
 // ── 後台：成員 ───────────────────────────────────────────────────────
 async function viewMembers(el) {
-  const members = await api("/api/ws/members");
+  const [members, roles] = await Promise.all([api("/api/ws/members"), api("/api/ws/roles")]);
+  const defaultRole = roles.find((r) => r.builtin === "viewer")?.id;
+  const roleOptions = (selected) => roles.map((r) => `<option value="${r.id}" ${r.id === selected ? "selected" : ""}>${esc(r.name)}（${LEVEL_LABEL[r.level]}）</option>`).join("");
   el.innerHTML = `
     <section class="card"><h2>工作區名稱</h2>
       <form class="form-row" id="wsForm"><input name="name" type="text" value="${esc(S.ws.name)}" required><button class="btn">儲存</button></form></section>
     <section class="card"><h2>成員（${members.length}）</h2>
-      <p class="sub">管理員：管理成員與設定；編輯：管理主題、帳號、觸發抓取；檢視者：只能看分析。</p>
+      <p class="sub">每位成員套用一個角色：角色決定看得到哪些選單與區塊，以及操作層級（檢視／編輯／管理）。${S.me.user.is_owner ? `角色內容到「<a href="#/roles">角色權限</a>」調整。` : "角色內容由系統擁有者設定。"}</p>
       <div class="table-wrap"><table class="data"><thead><tr><th>帳號</th><th>名稱</th><th>角色</th><th></th></tr></thead><tbody>
         ${members.map((m) => `<tr><td>${esc(m.username)}${m.is_owner ? ' <span class="badge own">系統擁有者</span>' : ""}</td><td>${esc(m.display_name)}</td>
-          <td><select data-role="${m.id}" ${m.id === S.me.user.id ? "disabled" : ""}>${Object.entries(ROLE_NAME).map(([k, v]) => `<option value="${k}" ${m.role === k ? "selected" : ""}>${v}</option>`).join("")}</select></td>
+          <td>${m.is_owner ? `<span class="muted small">不受角色限制，看得到全部</span>` : `<select data-role="${m.id}" ${m.id === S.me.user.id ? "disabled" : ""}>${roleOptions(m.role_id)}</select>`}</td>
           <td>${m.id === S.me.user.id ? "" : `<button class="btn sm danger" data-rm="${m.id}">移出</button>`}</td></tr>`).join("")}
       </tbody></table></div>
-      <h3>新增成員</h3><p class="sub">輸入已存在的帳號會直接加入；新帳號要設定初始密碼（至少 8 字元），請成員登入後到「我的帳號」修改。</p>
+      <h3>新增成員（開帳號）</h3><p class="sub">輸入已存在的帳號會直接加入並套用角色；新帳號要設定初始密碼（至少 8 字元），請成員登入後到「我的帳號」修改。</p>
       <form class="form-row" id="memForm">
         <label class="field">登入帳號<input name="username" type="text" required></label>
         <label class="field">顯示名稱<input name="display_name" type="text"></label>
         <label class="field">初始密碼<input name="password" type="password" autocomplete="new-password"></label>
-        <label class="field">角色<select name="role">${Object.entries(ROLE_NAME).map(([k, v]) => `<option value="${k}" ${k === "viewer" ? "selected" : ""}>${v}</option>`).join("")}</select></label>
+        <label class="field">角色<select name="role_id">${roleOptions(defaultRole)}</select></label>
         <button class="btn primary">加入</button>
       </form></section>`;
   const act = async (fn, msg) => { try { await fn(); if (msg) toast(msg); await boot(true); } catch (e) { toast(e.message, true); } };
   $("#wsForm").addEventListener("submit", (e) => { e.preventDefault(); act(() => api("/api/ws/", { method: "PATCH", body: { name: e.target.name.value } }), "已更新名稱"); });
   $("#memForm").addEventListener("submit", (e) => { e.preventDefault(); act(() => api("/api/ws/members", { body: Object.fromEntries(new FormData(e.target)) }), "已加入成員"); });
-  $$("[data-role]").forEach((s) => s.addEventListener("change", () => act(() => api(`/api/ws/members/${s.dataset.role}`, { method: "PATCH", body: { role: s.value } }), "已更新角色")));
+  $$("[data-role]").forEach((s) => s.addEventListener("change", () => act(() => api(`/api/ws/members/${s.dataset.role}`, { method: "PATCH", body: { role_id: Number(s.value) } }), "已更新角色")));
   $$("[data-rm]").forEach((b) => b.addEventListener("click", () => confirm("確定把這位成員移出工作區？") && act(() => api(`/api/ws/members/${b.dataset.rm}`, { method: "DELETE" }), "已移出")));
+}
+
+// ── 後台：角色權限（擁有者）──────────────────────────────────────────
+const LEVEL_LABEL = { admin: "管理", editor: "編輯", viewer: "檢視" };
+const LEVEL_DESC = {
+  viewer: "只能看，不能改設定、不能抓取",
+  editor: "可以管理主題與帳號、立即抓取、立即爬文",
+  admin: "編輯的權限，再加上管理成員與工作區名稱",
+};
+
+async function viewRoles(el, param) {
+  const { roles, registry: reg } = await api("/api/system/roles");
+  const menuLabel = Object.fromEntries(reg.menus.map((m) => [m.key, m.label]));
+  const editing = param === "new"
+    ? { id: null, name: "", level: "viewer", builtin: null, menus: reg.menus.filter((m) => m.group === "前台").map((m) => m.key), hidden_blocks: [] }
+    : roles.find((r) => String(r.id) === param) || null;
+
+  const permsHtml = (r) => ["前台", "後台"].map((g) => `
+    <div class="perm-group" data-group="${g}">
+      <div class="perm-head"><strong>${g === "前台" ? "前台・分析" : "後台・管理"}</strong>
+        <button type="button" class="link small" data-all="${g}">全選</button><button type="button" class="link small" data-none="${g}">全不選</button></div>
+      ${reg.menus.filter((m) => m.group === g).map((m) => {
+        const on = r.menus.includes(m.key);
+        return `<div class="perm-menu">
+          <label class="check"><input type="checkbox" name="menu" value="${m.key}" ${on ? "checked" : ""}> <strong>${esc(m.label)}</strong>${m.note ? ` <span class="muted small">（${esc(m.note)}）</span>` : ""}</label>
+          ${m.blocks.length ? `<div class="perm-blocks ${on ? "" : "off"}" data-for="${m.key}">${m.blocks.map(([k, label]) =>
+            `<label class="check small"><input type="checkbox" name="block" value="${k}" ${r.hidden_blocks.includes(k) ? "" : "checked"}> ${esc(label)}</label>`).join("")}</div>` : ""}
+        </div>`;
+      }).join("")}
+    </div>`).join("");
+
+  el.innerHTML = `
+    <section class="card"><h2>角色列表</h2>
+      <p class="sub">角色決定：看得到哪些選單、選單裡哪些區塊，以及操作層級。到「<a href="#/members">成員</a>」開帳號並指派角色。系統擁有者不受角色限制。</p>
+      <div class="table-wrap"><table class="data"><thead><tr><th>角色</th><th>操作層級</th><th>看得到的選單</th><th class="num">隱藏區塊</th><th class="num">成員</th><th></th></tr></thead><tbody>
+        ${roles.map((r) => `<tr><td class="nowrap"><strong>${esc(r.name)}</strong>${r.builtin ? ' <span class="badge">預設</span>' : ""}</td>
+          <td class="nowrap">${LEVEL_LABEL[r.level]}</td>
+          <td><div class="perm-summary">${r.menus.map((k) => esc(menuLabel[k] || k)).join("、") || "—"}</div></td>
+          <td class="num">${r.hidden_blocks.length}</td><td class="num">${r.members}</td>
+          <td class="nowrap"><a class="btn sm" href="#/roles/${r.id}">編輯</a> ${r.builtin ? "" : `<button class="btn sm danger" data-del="${r.id}">刪除</button>`}</td></tr>`).join("")}
+      </tbody></table></div>
+      <p style="margin-top:12px"><a class="btn primary" href="#/roles/new">新增角色</a></p>
+    </section>
+    ${editing ? `<section class="card" id="roleEditor"><h2>${editing.id ? `編輯角色：${esc(editing.name)}` : "新增角色"}</h2>
+      <form id="roleForm">
+        <div class="form-row">
+          <label class="field">角色名稱<input name="name" type="text" maxlength="30" value="${esc(editing.name)}" required></label>
+          <label class="field">操作層級<select name="level" ${editing.builtin === "admin" ? "disabled" : ""}>${["viewer", "editor", "admin"].map((l) => `<option value="${l}" ${editing.level === l ? "selected" : ""}>${LEVEL_LABEL[l]}</option>`).join("")}</select></label>
+        </div>
+        <p class="sub" id="levelDesc" style="margin-top:8px">${LEVEL_DESC[editing.level]}${editing.builtin === "admin" ? "（預設的管理員角色固定為管理層級）" : ""}</p>
+        <h3>看得到的選單與區塊</h3>
+        <p class="sub">勾選的選單才會出現在這個角色的側邊欄；選單底下的區塊取消勾選就會隱藏。「下載 CSV」「匯出 Excel」隱藏後，伺服器也會拒絕下載。</p>
+        ${permsHtml(editing)}
+        <div class="perm-group"><div class="perm-head"><strong>其他</strong></div>
+          <div class="perm-blocks" style="margin-left:0">${reg.global.map(([k, label]) =>
+            `<label class="check small"><input type="checkbox" name="block" value="${k}" ${editing.hidden_blocks.includes(k) ? "" : "checked"}> ${esc(label)}</label>`).join("")}</div></div>
+        <p><button class="btn primary">儲存</button> <a class="btn" href="#/roles">取消</a></p>
+      </form></section>` : ""}`;
+
+  $$("[data-del]", el).forEach((b) => b.addEventListener("click", async () => {
+    if (!confirm("確定刪除這個角色？")) return;
+    try { await api(`/api/system/roles/${b.dataset.del}`, { method: "DELETE" }); toast("已刪除角色"); viewRoles(el, ""); } catch (e) { toast(e.message, true); }
+  }));
+
+  const form = $("#roleForm");
+  if (!form) return;
+  $("#roleEditor").scrollIntoView({ block: "start" });
+  form.elements.level.addEventListener("change", (e) => { $("#levelDesc").textContent = LEVEL_DESC[e.target.value]; });
+  const syncBlocks = () => $$('input[name="menu"]', form).forEach((cb) => $(`.perm-blocks[data-for="${cb.value}"]`, form)?.classList.toggle("off", !cb.checked));
+  $$('input[name="menu"]', form).forEach((cb) => cb.addEventListener("change", syncBlocks));
+  $$("[data-all], [data-none]", form).forEach((b) => b.addEventListener("click", () => {
+    const g = b.dataset.all || b.dataset.none;
+    $$(`.perm-group[data-group="${g}"] input[type=checkbox]`, form).forEach((cb) => (cb.checked = !!b.dataset.all));
+    syncBlocks();
+  }));
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const body = {
+      name: form.elements.namedItem("name").value.trim(),
+      level: editing.builtin === "admin" ? "admin" : form.elements.level.value,
+      menus: $$('input[name="menu"]:checked', form).map((cb) => cb.value),
+      hidden_blocks: $$('input[name="block"]', form).filter((cb) => !cb.checked).map((cb) => cb.value),
+    };
+    try {
+      await api(editing.id ? `/api/system/roles/${editing.id}` : "/api/system/roles", { method: editing.id ? "PUT" : "POST", body });
+      toast("角色已儲存");
+      location.hash = "#/roles";
+    } catch (err) { toast(err.message, true); }
+  });
 }
 
 // ── 後台：系統設定（擁有者）──────────────────────────────────────────
@@ -1051,7 +1169,7 @@ async function boot(keepRoute = false) {
   S.ws = S.workspaces.find((w) => w.id === wsId) || S.workspaces[0];
   $("#auth").hidden = true;
   $("#app").hidden = false;
-  $("#meName").textContent = `${me.user.display_name}・${ROLE_NAME[S.ws.role]}`;
+  $("#meName").textContent = `${me.user.display_name}・${S.ws.role_name || ROLE_NAME[S.ws.role]}`;
   $("#wsSelect").innerHTML = S.workspaces.map((w) => `<option value="${w.id}" ${w.id === S.ws.id ? "selected" : ""}>${esc(w.name)}</option>`).join("");
   $("#daysSelect").value = String(S.days);
   await loadWorkspaceLists();
@@ -1079,7 +1197,7 @@ $("#wsSelect").addEventListener("change", async (e) => {
   S.compareSel = null;
   S.postSel = null;
   S.cmpA = S.cmpB = null;
-  $("#meName").textContent = `${S.me.user.display_name}・${ROLE_NAME[S.ws.role]}`;
+  $("#meName").textContent = `${S.me.user.display_name}・${S.ws.role_name || ROLE_NAME[S.ws.role]}`;
   await loadWorkspaceLists();
   route();
 });

@@ -1,6 +1,7 @@
 // ── 登入、session、工作區權限 ─────────────────────────────────────────
 import crypto from "crypto";
 import { db, now } from "./db.js";
+import { permsFor, LEVEL_NAME } from "./roles.js";
 
 // 勾「記住我」：30 天，使用中剩不到一半效期會自動延長；沒勾：12 小時、關掉瀏覽器就要重新登入
 const REMEMBER_DAYS = 30;
@@ -97,14 +98,16 @@ export function sessionUser(req) {
   return { id: row.id, username: row.username, display_name: row.display_name, is_owner: !!row.is_owner };
 }
 
+// 每個工作區附上這個人在該工作區的角色權限，前端據此決定顯示哪些選單與區塊
 export function userWorkspaces(user) {
-  if (user.is_owner) {
-    return db.prepare(`SELECT w.id, w.name, COALESCE(m.role, 'admin') AS role FROM workspaces w
-        LEFT JOIN memberships m ON m.workspace_id = w.id AND m.user_id = ? ORDER BY w.id`).all(user.id)
-      .map((w) => ({ ...w, role: "admin" }));
-  }
-  return db.prepare(`SELECT w.id, w.name, m.role FROM memberships m JOIN workspaces w ON w.id = m.workspace_id
-      WHERE m.user_id = ? ORDER BY w.id`).all(user.id);
+  const rows = user.is_owner
+    ? db.prepare("SELECT id, name FROM workspaces ORDER BY id").all()
+    : db.prepare(`SELECT w.id, w.name FROM memberships m JOIN workspaces w ON w.id = m.workspace_id
+        WHERE m.user_id = ? ORDER BY w.id`).all(user.id);
+  return rows.map((w) => {
+    const p = permsFor(user, w.id);
+    return { id: w.id, name: w.name, role: p.level, role_name: p.role_name, menus: p.menus, hidden_blocks: p.hidden, owner: p.owner };
+  });
 }
 
 // ── express middleware ────────────────────────────────────────────────
@@ -120,17 +123,18 @@ export function requireOwner(req, res, next) {
   next();
 }
 
-// 工作區由 X-Workspace 標頭（或 ?ws=）指定；系統擁有者對所有工作區都是 admin
+// 工作區由 X-Workspace 標頭（或 ?ws=）指定；操作層級與可看選單都來自這個人在該工作區的角色
+// 系統擁有者對所有工作區都是管理層級、看得到全部
 export function withWorkspace(minRole = "viewer") {
   return (req, res, next) => {
     const wsId = Number(req.headers["x-workspace"] || req.query.ws);
     if (!wsId) return res.status(400).json({ error: "缺少工作區" });
     const ws = db.prepare("SELECT id, name FROM workspaces WHERE id = ?").get(wsId);
     if (!ws) return res.status(404).json({ error: "工作區不存在" });
-    let role = req.user.is_owner ? "admin" : db.prepare("SELECT role FROM memberships WHERE user_id = ? AND workspace_id = ?").get(req.user.id, wsId)?.role;
-    if (!role) return res.status(403).json({ error: "你不是這個工作區的成員" });
-    if (ROLE_RANK[role] < ROLE_RANK[minRole]) return res.status(403).json({ error: `需要「${minRole}」以上權限` });
-    req.ws = { id: ws.id, name: ws.name, role };
+    const perms = permsFor(req.user, wsId);
+    if (!perms) return res.status(403).json({ error: "你不是這個工作區的成員" });
+    if (ROLE_RANK[perms.level] < ROLE_RANK[minRole]) return res.status(403).json({ error: `你的角色需要「${LEVEL_NAME[minRole]}」以上的操作層級` });
+    req.ws = { id: ws.id, name: ws.name, role: perms.level, perms };
     next();
   };
 }

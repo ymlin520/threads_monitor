@@ -21,6 +21,9 @@ const DAY = 86400000;
 const HOUR = 3600000;
 const SEARCH_SCROLLS = 12;
 const POST_SCROLLS = 3;
+// 訪客模式每個 session 搜尋只給 5–12 篇、而且每種搜尋網址給的不一樣；
+// 換幾種 serp_type、各開一個新的訪客 session 再合併，近幾小時的貼文才抓得到（實測單一網址常常 0 篇）
+const GUEST_SERPS = { keyword: ["default", "", "tags"], hashtag: ["tags"] };
 
 // newCodes：這次新收的貼文，結束時寫進 runs.new_codes
 export const state = { running: false, runId: null, trigger: null, hours: null, startedAt: null, log: [], newCodes: new Set() };
@@ -223,13 +226,8 @@ async function scrollCollect(page, scrolls, stopAtWall) {
   return { boxes, loggedOut };
 }
 
-// group = { type, term, max_days, topics: [{ id, max_days }] }
-// hours：立即爬文的時間窗；有值時只收近 hours 小時的新貼文，不套用「今天優先」
-async function searchTopic(page, group, dict, stats, revisit, hours) {
-  const serp = group.type === "hashtag" ? "tags" : "default";
-  const label = group.type === "hashtag" ? `#${group.term}` : `「${group.term}」`;
-  log(hours ? `搜尋 ${label}（近 ${hours} 小時）` : `搜尋 ${label}（今天優先，沒有才收近 ${group.max_days} 天）`);
-  await page.goto(`${BASE}/search?q=${encodeURIComponent(group.term)}&serp_type=${serp}`, { waitUntil: "domcontentloaded" }).catch(() => {});
+async function searchOnce(page, term, serp) {
+  await page.goto(`${BASE}/search?q=${encodeURIComponent(term)}${serp ? `&serp_type=${serp}` : ""}`, { waitUntil: "domcontentloaded" }).catch(() => {});
   await page.waitForTimeout(7000);
 
   // 登入後才有「最新」分頁；訪客模式沒有就跳過
@@ -240,12 +238,32 @@ async function searchTopic(page, group, dict, stats, revisit, hours) {
     }
   } catch {}
 
-  const { boxes, loggedOut } = await scrollCollect(page, SEARCH_SCROLLS, true);
-  if (loggedOut) stats.logged_out = 1;
-  if (!boxes.size) {
-    const u = page.url();
-    log(`  一篇都沒掃到${/login|challenge|checkpoint/.test(u) ? `（被導向 ${u}，疑似被擋）` : ""}`);
+  const r = await scrollCollect(page, SEARCH_SCROLLS, true);
+  const u = page.url();
+  if (!r.boxes.size && /login|challenge|checkpoint/.test(u)) log(`  被導向 ${u}，疑似被擋`);
+  return r;
+}
+
+// group = { type, term, max_days, topics: [{ id, max_days }] }
+// hours：立即爬文的時間窗；有值時只收近 hours 小時的新貼文，不套用「今天優先」
+// browse = { page, authed, guestPage }：有登入就用主頁面切「最新」；訪客模式每種搜尋各開一個新 session
+async function searchTopic(browse, group, dict, stats, revisit, hours) {
+  const label = group.type === "hashtag" ? `#${group.term}` : `「${group.term}」`;
+  log(hours ? `搜尋 ${label}（近 ${hours} 小時）` : `搜尋 ${label}（今天優先，沒有才收近 ${group.max_days} 天）`);
+
+  const boxes = new Map();
+  let loggedOut = false;
+  const serps = browse.authed ? [group.type === "hashtag" ? "tags" : "default"] : GUEST_SERPS[group.type];
+  for (const serp of serps) {
+    const g = browse.authed ? { page: browse.page, close: async () => {} } : await browse.guestPage();
+    try {
+      const r = await searchOnce(g.page, group.term, serp);
+      for (const [code, b] of r.boxes) boxes.set(code, b);
+      loggedOut ||= r.loggedOut;
+    } finally { await g.close(); }
   }
+  if (loggedOut) stats.logged_out = 1;
+  if (!boxes.size) log("  一篇都沒掃到");
 
   // 先挑出符合關鍵字、且在天數（立即爬文：小時）內的貼文
   const term = group.term.toLowerCase();
@@ -287,7 +305,7 @@ async function searchTopic(page, group, dict, stats, revisit, hours) {
     : hours ? `收 ${picked.length} 篇`
     : todays.length ? `今天有 ${todays.length} 篇，只收今天的${fresh.length > todays.length ? `（前幾天的 ${fresh.length - todays.length} 篇不收）` : ""}`
     : `今天沒有，改收近 ${group.max_days} 天的 ${picked.length} 篇`;
-  log(`  掃到 ${boxes.size} 篇，${hours ? `近 ${hours} 小時內` : "符合"} ${inWindow.length} 篇，已抓過略過 ${dupes} 篇 → ${rule}${loggedOut ? "（遇到登入牆）" : ""}`);
+  log(`  掃到 ${boxes.size} 篇${serps.length > 1 ? `（${serps.length} 種搜尋合併）` : ""}，${hours ? `近 ${hours} 小時內` : "符合"} ${inWindow.length} 篇，已抓過略過 ${dupes} 篇 → ${rule}${loggedOut ? "（遇到登入牆）" : ""}`);
   return matched;
 }
 
@@ -400,10 +418,20 @@ async function crawl(runId, { hours = 0, wsId = null, visit = true } = {}) {
     await page.goto(BASE, { waitUntil: "domcontentloaded" }).catch(() => {});
     await page.waitForTimeout(5000);
 
+    // 訪客模式搜尋每次開一個乾淨的 context（等於新的訪客 session），用完就關
+    const browse = {
+      page,
+      authed: hasAuth,
+      guestPage: async () => {
+        const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 }, locale: "zh-TW" });
+        return { page: await ctx.newPage(), close: () => ctx.close().catch(() => {}) };
+      },
+    };
+
     const listCounts = new Map();
     for (const g of groups.values()) {
       try {
-        for (const [code, c] of await searchTopic(page, g, dict, stats, revisit, hours)) listCounts.set(code, c);
+        for (const [code, c] of await searchTopic(browse, g, dict, stats, revisit, hours)) listCounts.set(code, c);
       } catch (e) { log(`  搜尋失敗：${e.message}`); }
     }
     for (const h of handles) {
