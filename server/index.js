@@ -1,8 +1,9 @@
 // ── Threads 監測系統：API ＋ 靜態網頁 ─────────────────────────────────
 // 預設只聽 127.0.0.1（只有這台電腦能開）；要讓同網路的人連，啟動前設 HOST=0.0.0.0
 import express from "express";
+import fs from "fs";
 import path from "path";
-import { db, ROOT, now, getRawSettings, setSettings, createWorkspace, tx } from "./db.js";
+import { db, ROOT, DATA_DIR, now, getRawSettings, setSettings, createWorkspace, tx } from "./db.js";
 import {
   COOKIE, needsSetup, validateCredentials, createUser, checkLogin, createSession, renewSession, destroySession, sessionToken,
   setPassword, verifyPassword, userWorkspaces, requireUser, requireOwner, withWorkspace,
@@ -297,6 +298,16 @@ ws.patch("/", admin, menu("members"), (req, res) => {
 });
 
 app.use("/api/ws", ws);
+
+// 目前的 Cloudflare 臨時網址：看門狗（scripts/keep-alive.mjs）寫在 data/logs/current_url.txt
+app.get("/api/public-url", requireUser, (req, res) => {
+  try {
+    const txt = fs.readFileSync(path.join(DATA_DIR, "logs", "current_url.txt"), "utf8");
+    res.json({ url: (txt.match(/https:\/\/\S+/) || [])[0] || null, updated: (txt.match(/更新時間：(.+)/) || [])[1]?.trim() || null });
+  } catch {
+    res.json({ url: null, updated: null });
+  }
+});
 
 // ── 抓取狀態（所有登入者都能看）──────────────────────────────────────
 app.get("/api/crawl/status", requireUser, (req, res) =>

@@ -526,7 +526,30 @@ Select-String -Path "$logs\cloudflared.log" -Pattern 'https://[a-z0-9-]+\.tryclo
 | 確認伺服器在跑 | 瀏覽 http://127.0.0.1:3900/api/setup-status |
 | 看伺服器錯誤 | `data\logs\server.err.log` |
 
-**開機自動啟動**（選用）：把上面的指令存成 `start-threads-monitor.ps1`，在「Windows 工作排程器」建立一個「登入時」觸發的工作執行它；或在 `shell:startup` 資料夾放一個執行它的捷徑。開機後通道會是新網址，可以從 `data\logs\cloudflared.log` 查到。
+### 看門狗（建議用這個，取代上面的手動啟動）
+
+`scripts/keep-alive.mjs` 每 30 秒檢查一次，伺服器或通道掛掉就自動重開：
+
+```bash
+node scripts/keep-alive.mjs          # 常駐
+node scripts/keep-alive.mjs --once   # 只檢查一次
+```
+
+- 伺服器沒回應 → 重新啟動；通道沒回應 → 重開並取得新網址
+- 目前的公開網址寫在 `data/logs/current_url.txt`，登入後在「系統設定 → 目前的公開網址」也看得到，可一鍵複製
+- 檢查公開網址時**不使用本機 DNS**：先用 1.1.1.1／8.8.8.8 解析再直接連該 IP。有些網路（例如校園 DNS）不解析 `*.trycloudflare.com`，用本機 DNS 會誤判成掛掉、每 30 秒重開一次、網址一直換
+- 只會關掉自己啟動的程序（PID 記在 `data/logs/keepalive.json`），不會影響其他專案的 cloudflared
+- 紀錄在 `data/logs/keepalive.log`
+
+**開機自動啟動**：在「啟動」資料夾（`shell:startup`）放一個 `threads-monitor.vbs`，內容是隱藏視窗執行看門狗：
+
+```vbs
+CreateObject("WScript.Shell").Run Chr(34) & "C:\path\to\node.exe" & Chr(34) & " --no-warnings " & Chr(34) & "C:\path\to\threads_monitor\scripts\keep-alive.mjs" & Chr(34), 0, False
+```
+
+用「啟動」資料夾不需要系統管理員權限（工作排程器的「登入時」觸發需要）。開機後通道會是新網址，從 `data/logs/current_url.txt` 或系統設定頁查。
+
+> **網路會擋通道網域的情況**：部分單位（例如校園網路）的 DNS 不解析 `*.trycloudflare.com`，在那個網路裡不管換幾次臨時網址都連不上——這不是系統壞掉，從校外或手機行動網路連就正常。在本機一律可用 `http://127.0.0.1:3900`；要在該網路內用網址連，需改用自己網域的具名通道。
 
 ---
 

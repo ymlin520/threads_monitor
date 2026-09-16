@@ -1025,8 +1025,13 @@ async function viewRoles(el, param) {
 
 // ── 後台：系統設定（擁有者）──────────────────────────────────────────
 async function viewSystem(el) {
-  const [s, wss, users] = await Promise.all([api("/api/system/settings"), api("/api/system/workspaces"), api("/api/system/users")]);
+  const [s, wss, users, pub] = await Promise.all([api("/api/system/settings"), api("/api/system/workspaces"), api("/api/system/users"), api("/api/public-url").catch(() => ({ url: null, updated: null }))]);
   el.innerHTML = `
+    <section class="card"><h2>目前的公開網址</h2>
+      <p class="sub">Cloudflare 臨時網址，通道重開（例如電腦重開機）就會換一組，看門狗會自動更新這裡。注意：學校 DNS 不解析這個網域，校內開不起來，請用校外網路或手機行動網路；在這台電腦請用 http://127.0.0.1:3900。</p>
+      ${pub.url ? `<p><a href="${esc(pub.url)}" target="_blank" rel="noopener">${esc(pub.url)}</a> <button class="btn sm" id="copyUrl" type="button">複製</button></p>
+        <p class="muted small">更新時間：${esc(pub.updated || "—")}</p>` : empty("還沒有公開網址：看門狗沒在跑，或通道還沒建立")}
+    </section>
     <section class="card"><h2>抓取與排程</h2>
       <form id="setForm">
         <div class="form-row">
@@ -1067,6 +1072,9 @@ async function viewSystem(el) {
     body.headless = f.headless.checked ? "1" : "0";
     body.revisit_old = f.revisit_old.checked ? "1" : "0";
     try { await api("/api/system/settings", { method: "PUT", body }); toast("已儲存"); } catch (err) { toast(err.message, true); }
+  });
+  $("#copyUrl")?.addEventListener("click", async () => {
+    try { await navigator.clipboard.writeText(pub.url); toast("已複製公開網址"); } catch { toast("複製失敗，請手動選取", true); }
   });
   $("#reanalyze").addEventListener("click", async () => {
     try { const r = await api("/api/system/reanalyze", { body: {} }); toast(`已重新分析 ${r.posts} 篇貼文、${r.comments} 則留言`); } catch (err) { toast(err.message, true); }
